@@ -261,7 +261,6 @@ def apply_advanced_filters(df: pd.DataFrame) -> AdvancedFilters:
             "Faixa de valor (R$)",
             min_value=0.0,
             max_value=float(max_value),
-            value=st.session_state.get(_state_key("valor_range"), (0.0, float(max_value))),
             key=_state_key("valor_range"),
         )
 
