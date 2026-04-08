@@ -1,6 +1,6 @@
-# PNCP Intelligence
+# PNCP_intel
 
-Aplicacao Streamlit para consulta e analise de contratos publicos do PNCP por CNPJ de fornecedor.
+Busca de contratos de fornecedores na base publica do PNCP com interface Streamlit.
 
 ## Requisitos
 
