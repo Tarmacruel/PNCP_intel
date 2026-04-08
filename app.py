@@ -12,6 +12,17 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from components import (
+    alert as ui_alert,
+    chart_wrapper,
+    empty_state as ui_empty_state,
+    footer_block,
+    metric_card as ui_metric_card,
+    paginated_table,
+    render_loading_skeleton,
+    section_header,
+)
+
 
 st.set_page_config(
     page_title="PNCP Intelligence",
@@ -25,6 +36,7 @@ APP_TITLE = "PNCP Intelligence"
 SEARCH_API_URL = "https://pncp.gov.br/api/search/"
 DETAIL_API_BASE = "https://pncp.gov.br/api/pncp/v1/orgaos"
 APP_BASE_URL = "https://pncp.gov.br/app"
+REPO_URL = "https://github.com/Tarmacruel/PNCP_intel"
 CACHE_TTL_SECONDS = 3600
 DEFAULT_PAGE_SIZE = 100
 MAX_RETRIES = 4
@@ -45,197 +57,542 @@ def load_css() -> None:
         @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap");
 
         :root {
-            --bg: #f4f7fb;
-            --surface: #ffffff;
-            --text: #102a43;
-            --muted: #627d98;
-            --primary: #0b4f6c;
-            --border: rgba(11, 79, 108, 0.12);
-            --shadow: 0 20px 60px rgba(16, 42, 67, 0.08);
+            --primary: #12344d;
+            --primary-dark: #0b2437;
+            --secondary: #2f5f7e;
+            --accent: #c17b2d;
+            --accent-2: #d89443;
+            --success: #1f8f63;
+            --warning: #cb7a19;
+            --danger: #b94848;
+            --bg-app: #f4f7fb;
+            --bg-card: rgba(255, 255, 255, 0.94);
+            --bg-soft: #ecf2f7;
+            --text-primary: #11283b;
+            --text-secondary: #66788a;
+            --border: rgba(18, 52, 77, 0.11);
+            --shadow-sm: 0 10px 24px rgba(17, 40, 59, 0.05);
+            --shadow-md: 0 20px 50px rgba(17, 40, 59, 0.08);
+            --shadow-lg: 0 30px 70px rgba(17, 40, 59, 0.14);
+            --radius: 18px;
+            --radius-lg: 26px;
+            --transition: all .22s ease;
         }
 
         html, body, [class*="css"] { font-family: "Manrope", sans-serif; }
+
         .stApp {
             background:
-                radial-gradient(circle at top right, rgba(11, 79, 108, 0.08), transparent 28%),
-                linear-gradient(180deg, #f8fbfe 0%, var(--bg) 100%);
+                radial-gradient(circle at top right, rgba(193, 123, 45, 0.12), transparent 22%),
+                radial-gradient(circle at 15% 10%, rgba(18, 52, 77, 0.08), transparent 28%),
+                linear-gradient(180deg, #fbfdff 0%, var(--bg-app) 100%);
         }
+
         #MainMenu, header, footer { visibility: hidden; }
+        .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
+
         [data-testid="stSidebar"] {
-            background: linear-gradient(180deg, rgba(11,79,108,.98) 0%, rgba(10,61,83,.98) 100%);
+            background:
+                linear-gradient(180deg, rgba(11,36,55,.985) 0%, rgba(18,52,77,.985) 65%, rgba(34,69,95,.98) 100%);
             border-right: 1px solid rgba(255, 255, 255, 0.08);
         }
-        [data-testid="stSidebar"] * { color: #f8fbfe; }
+
+        [data-testid="stSidebar"] * { color: #f8fbff; }
         [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
         [data-testid="stSidebar"] label,
-        [data-testid="stSidebar"] span { color: #f8fbfe !important; }
+        [data-testid="stSidebar"] span,
+        [data-testid="stSidebar"] div { color: inherit; }
+        [data-testid="stSidebar"] [data-baseweb="input"] input,
         [data-testid="stSidebar"] input,
-        [data-testid="stSidebar"] textarea { color: #102a43 !important; }
-        .block-container { padding-top: 2rem; padding-bottom: 2rem; }
+        [data-testid="stSidebar"] textarea {
+            color: var(--text-primary) !important;
+            background: rgba(255,255,255,.95) !important;
+        }
+
         .masthead {
             position: relative;
             overflow: hidden;
-            padding: 1.6rem 1.7rem;
-            border: 1px solid var(--border);
-            border-radius: 24px;
-            background: linear-gradient(135deg, rgba(10,61,83,.98) 0%, rgba(11,79,108,.94) 56%, rgba(192,122,44,.88) 100%);
-            box-shadow: var(--shadow);
-            color: #ffffff;
-            margin-bottom: 1.2rem;
-            animation: rise 320ms ease-out;
+            padding: 1.8rem 1.8rem;
+            border-radius: var(--radius-lg);
+            background:
+                linear-gradient(132deg, rgba(11,36,55,.99) 0%, rgba(18,52,77,.97) 52%, rgba(47,95,126,.95) 78%, rgba(193,123,45,.86) 100%);
+            box-shadow: var(--shadow-lg);
+            color: white;
+            margin-bottom: 1.1rem;
+            border: 1px solid rgba(255,255,255,.08);
+            animation: rise .34s ease-out;
         }
-        .masthead::after {
+
+        .masthead::before {
             content: "";
             position: absolute;
             inset: 0;
             background:
-                linear-gradient(120deg, rgba(255,255,255,.04) 0%, transparent 35%),
-                radial-gradient(circle at 85% 15%, rgba(255,255,255,.14), transparent 26%);
+                linear-gradient(120deg, rgba(255,255,255,.04), transparent 34%),
+                radial-gradient(circle at 84% 18%, rgba(255,255,255,.18), transparent 22%);
             pointer-events: none;
         }
+
         .masthead-grid {
             position: relative;
             z-index: 1;
             display: grid;
-            grid-template-columns: minmax(0, 1.6fr) minmax(240px, .8fr);
-            gap: 1rem;
+            grid-template-columns: minmax(0, 1.55fr) minmax(260px, .9fr);
+            gap: 1.2rem;
             align-items: end;
         }
+
         .eyebrow {
             display: inline-flex;
             align-items: center;
             gap: .45rem;
-            padding: .36rem .7rem;
+            padding: .38rem .74rem;
             border-radius: 999px;
             background: rgba(255,255,255,.12);
-            font-size: .78rem;
-            font-weight: 700;
-            letter-spacing: .08em;
+            font-size: .74rem;
+            font-weight: 800;
+            letter-spacing: .1em;
             text-transform: uppercase;
         }
+
         .masthead h1 {
-            margin: .9rem 0 .45rem 0;
-            font-size: clamp(1.9rem, 3vw, 2.7rem);
-            line-height: 1.05;
+            margin: .85rem 0 .5rem;
+            font-size: clamp(2rem, 3vw, 2.8rem);
+            line-height: 1.02;
+            letter-spacing: -.03em;
             font-weight: 800;
         }
-        .masthead p { margin: 0; max-width: 64ch; line-height: 1.6; color: rgba(255,255,255,.88); }
-        .masthead-note {
-            padding: .95rem 1rem;
-            border-radius: 18px;
-            background: rgba(255,255,255,.12);
-            backdrop-filter: blur(6px);
-            border: 1px solid rgba(255,255,255,.16);
+
+        .masthead p {
+            margin: 0;
+            max-width: 62ch;
+            font-size: 1rem;
+            line-height: 1.62;
+            color: rgba(255,255,255,.86);
         }
+
+        .masthead-note {
+            padding: 1rem 1.05rem;
+            border-radius: 20px;
+            background: rgba(255,255,255,.11);
+            border: 1px solid rgba(255,255,255,.12);
+            backdrop-filter: blur(10px);
+        }
+
         .masthead-note strong {
             display: block;
-            font-size: .82rem;
-            text-transform: uppercase;
-            letter-spacing: .08em;
-            opacity: .86;
             margin-bottom: .45rem;
-        }
-        .masthead-note span { display: block; font-size: 1rem; line-height: 1.55; }
-        .metric-card {
-            padding: 1rem 1.1rem;
-            border-radius: 20px;
-            border: 1px solid var(--border);
-            background: rgba(255,255,255,.92);
-            box-shadow: 0 10px 32px rgba(16,42,67,.05);
-            animation: rise 360ms ease-out;
-        }
-        .metric-label {
-            color: var(--muted);
-            font-size: .77rem;
-            font-weight: 700;
-            letter-spacing: .06em;
+            font-size: .76rem;
+            letter-spacing: .08em;
             text-transform: uppercase;
+            opacity: .82;
         }
-        .metric-value {
-            margin-top: .4rem;
-            color: var(--text);
-            font-size: clamp(1.2rem, 2vw, 1.85rem);
-            font-weight: 800;
-            line-height: 1.1;
+
+        .masthead-note span {
+            display: block;
+            line-height: 1.55;
+            font-size: .98rem;
         }
-        .metric-subtitle { margin-top: .35rem; color: var(--muted); font-size: .85rem; }
-        .filter-card, .info-card {
-            padding: 1rem 1.1rem;
-            border-radius: 18px;
-            background: rgba(255,255,255,.88);
+
+        .info-card,
+        .filter-card {
+            background: var(--bg-card);
             border: 1px solid var(--border);
-            box-shadow: 0 12px 34px rgba(16,42,67,.05);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow-sm);
+            padding: 1rem 1.1rem;
+            animation: rise .34s ease-out;
         }
-        .section-title { margin: 0; color: var(--text); font-size: 1.05rem; font-weight: 800; letter-spacing: -.01em; }
-        .section-copy { margin: .28rem 0 0 0; color: var(--muted); font-size: .92rem; line-height: 1.55; }
-        .pill-row { display: flex; flex-wrap: wrap; gap: .55rem; margin-top: .8rem; }
-        .pill {
+
+        .section-title {
+            margin: 0;
+            color: var(--text-primary);
+            font-size: 1rem;
+            font-weight: 800;
+            letter-spacing: -.02em;
+        }
+
+        .section-copy {
+            margin: .25rem 0 0;
+            color: var(--text-secondary);
+            font-size: .92rem;
+            line-height: 1.56;
+        }
+
+        .section-block {
+            margin: 0 0 .8rem;
+            padding-bottom: .4rem;
+        }
+
+        .section-title-row {
+            display: flex;
+            align-items: center;
+            gap: .55rem;
+        }
+
+        .section-icon {
+            display: inline-flex;
+            width: 1.85rem;
+            height: 1.85rem;
+            align-items: center;
+            justify-content: center;
+            border-radius: 999px;
+            background: rgba(18,52,77,.08);
+            color: var(--primary);
+            font-weight: 700;
+        }
+
+        .section-heading {
+            margin: 0;
+            color: var(--text-primary);
+            font-size: 1.08rem;
+            font-weight: 800;
+            letter-spacing: -.02em;
+        }
+
+        .metric-card {
+            background: linear-gradient(180deg, rgba(255,255,255,.98), rgba(248,251,255,.92));
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 1rem 1.05rem;
+            min-height: 152px;
+            box-shadow: var(--shadow-sm);
+            transition: var(--transition);
+            display: flex;
+            flex-direction: column;
+            gap: .26rem;
+            animation: rise .36s ease-out;
+        }
+
+        .metric-card:hover {
+            transform: translateY(-3px);
+            box-shadow: var(--shadow-md);
+            border-color: rgba(47,95,126,.25);
+        }
+
+        .metric-icon {
+            width: 2.2rem;
+            height: 2.2rem;
             display: inline-flex;
             align-items: center;
-            gap: .4rem;
-            padding: .45rem .72rem;
-            border-radius: 999px;
-            background: rgba(11,79,108,.08);
+            justify-content: center;
+            border-radius: 14px;
+            background: linear-gradient(135deg, rgba(18,52,77,.08), rgba(193,123,45,.12));
             color: var(--primary);
-            font-size: .8rem;
+            font-size: 1.1rem;
             font-weight: 700;
+            margin-bottom: .15rem;
         }
+
+        .metric-label {
+            color: var(--text-secondary);
+            font-size: .73rem;
+            font-weight: 800;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+        }
+
+        .metric-value {
+            color: var(--text-primary);
+            font-size: clamp(1.28rem, 2vw, 1.9rem);
+            font-weight: 800;
+            letter-spacing: -.03em;
+            line-height: 1.08;
+        }
+
+        .ui-delta {
+            margin-top: auto;
+            padding-top: .35rem;
+            color: var(--text-secondary);
+            font-size: .84rem;
+            font-weight: 600;
+        }
+
+        .ui-delta-positive { color: var(--success); }
+        .ui-delta-warning { color: var(--warning); }
+        .ui-delta-negative { color: var(--danger); }
+
+        .pill-row,
+        .table-toolbar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: .5rem;
+            margin-top: .8rem;
+        }
+
+        .pill,
+        .ui-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: .4rem .72rem;
+            border-radius: 999px;
+            font-size: .76rem;
+            font-weight: 700;
+            line-height: 1;
+            white-space: nowrap;
+        }
+
+        .pill,
+        .ui-badge-primary {
+            background: rgba(18,52,77,.08);
+            color: var(--primary);
+        }
+
+        .ui-badge-success {
+            background: rgba(31,143,99,.12);
+            color: var(--success);
+        }
+
+        .ui-badge-warning {
+            background: rgba(203,122,25,.14);
+            color: var(--warning);
+        }
+
+        .ui-badge-danger {
+            background: rgba(185,72,72,.12);
+            color: var(--danger);
+        }
+
+        .ui-alert {
+            display: flex;
+            gap: .7rem;
+            align-items: flex-start;
+            padding: .95rem 1rem;
+            margin: .8rem 0 1rem;
+            border-radius: 16px;
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow-sm);
+        }
+
+        .ui-alert-icon {
+            width: 1.75rem;
+            height: 1.75rem;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 999px;
+            font-weight: 800;
+            font-size: .86rem;
+            flex-shrink: 0;
+        }
+
+        .ui-alert-text {
+            line-height: 1.58;
+            font-size: .92rem;
+            color: var(--text-primary);
+        }
+
+        .ui-alert-info {
+            background: rgba(18,52,77,.05);
+        }
+
+        .ui-alert-info .ui-alert-icon {
+            background: rgba(18,52,77,.12);
+            color: var(--primary);
+        }
+
+        .ui-alert-warning {
+            background: rgba(203,122,25,.08);
+            border-color: rgba(203,122,25,.16);
+        }
+
+        .ui-alert-warning .ui-alert-icon {
+            background: rgba(203,122,25,.14);
+            color: var(--warning);
+        }
+
+        .ui-alert-success {
+            background: rgba(31,143,99,.08);
+            border-color: rgba(31,143,99,.16);
+        }
+
+        .ui-alert-success .ui-alert-icon {
+            background: rgba(31,143,99,.14);
+            color: var(--success);
+        }
+
+        .ui-alert-error {
+            background: rgba(185,72,72,.08);
+            border-color: rgba(185,72,72,.18);
+        }
+
+        .ui-alert-error .ui-alert-icon {
+            background: rgba(185,72,72,.14);
+            color: var(--danger);
+        }
+
         .empty-state {
-            padding: 1.2rem 1.3rem;
-            border-radius: 18px;
-            background: linear-gradient(180deg, rgba(255,255,255,.94), rgba(238,243,248,.9));
-            border: 1px dashed rgba(11,79,108,.22);
-            color: var(--text);
+            text-align: center;
+            padding: 2.3rem 1.5rem;
+            border-radius: 22px;
+            background: linear-gradient(180deg, rgba(255,255,255,.96), rgba(239,244,250,.9));
+            border: 1px dashed rgba(18,52,77,.18);
+            box-shadow: var(--shadow-sm);
         }
-        .empty-state h3 { margin: 0 0 .4rem 0; font-size: 1.05rem; }
-        .empty-state p { margin: 0; color: var(--muted); line-height: 1.65; }
-        .stTabs [data-baseweb="tab-list"] { gap: .5rem; padding-bottom: .2rem; }
+
+        .empty-state-icon {
+            font-size: 2.8rem;
+            line-height: 1;
+            margin-bottom: .85rem;
+        }
+
+        .empty-state h3 {
+            margin: 0 0 .42rem;
+            color: var(--text-primary);
+            font-size: 1.08rem;
+            font-weight: 800;
+        }
+
+        .empty-state p {
+            margin: 0 auto;
+            max-width: 52ch;
+            color: var(--text-secondary);
+            line-height: 1.66;
+        }
+
+        .ui-skeleton-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 1rem;
+            margin: 1rem 0 1.2rem;
+        }
+
+        .ui-skeleton-card,
+        .ui-skeleton-chart {
+            border-radius: 18px;
+            background: linear-gradient(90deg, #eef3f7 25%, #e2eaf1 50%, #eef3f7 75%);
+            background-size: 200% 100%;
+            animation: shimmer 1.6s infinite linear;
+        }
+
+        .ui-skeleton-card { height: 146px; }
+        .ui-skeleton-chart { height: 360px; }
+
+        .stTabs [data-baseweb="tab-list"] {
+            gap: .5rem;
+            padding-bottom: .3rem;
+            margin-bottom: .35rem;
+        }
+
         .stTabs [data-baseweb="tab"] {
             height: auto;
-            padding: .7rem 1rem;
+            padding: .72rem 1rem;
             border-radius: 999px;
             background: rgba(255,255,255,.84);
             border: 1px solid var(--border);
-            color: var(--muted);
+            color: var(--text-secondary);
             font-weight: 700;
         }
+
         .stTabs [aria-selected="true"] {
             color: var(--primary) !important;
-            border-color: rgba(11,79,108,.24);
-            box-shadow: 0 10px 24px rgba(16,42,67,.06);
+            border-color: rgba(18,52,77,.22);
+            box-shadow: 0 12px 26px rgba(17,40,59,.08);
         }
+
         .stButton > button,
         .stDownloadButton > button,
         .stFormSubmitButton > button {
             width: 100%;
             border: 0;
             border-radius: 14px;
-            background: linear-gradient(135deg, #0b4f6c 0%, #13627f 100%);
+            background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
             color: white;
             font-weight: 800;
-            padding: .72rem 1rem;
-            box-shadow: 0 14px 30px rgba(11,79,108,.18);
+            padding: .74rem 1rem;
+            box-shadow: 0 14px 30px rgba(193,123,45,.24);
+            transition: var(--transition);
         }
+
         .stButton > button:hover,
         .stDownloadButton > button:hover,
         .stFormSubmitButton > button:hover {
-            border: 0;
+            transform: translateY(-2px);
+            box-shadow: 0 18px 36px rgba(193,123,45,.3);
+            background: linear-gradient(135deg, #b76e20 0%, var(--accent) 100%);
             color: white;
-            background: linear-gradient(135deg, #0a465f 0%, #115873 100%);
+            border: 0;
         }
+
+        .stTextInput input,
+        .stDateInput input,
+        [data-baseweb="select"] > div,
+        .stNumberInput input {
+            border-radius: 14px !important;
+            border: 1px solid rgba(18,52,77,.14) !important;
+            background: rgba(255,255,255,.95) !important;
+            color: var(--text-primary) !important;
+            min-height: 46px;
+        }
+
+        .stTextInput input:focus,
+        .stDateInput input:focus,
+        .stNumberInput input:focus {
+            border-color: rgba(47,95,126,.4) !important;
+            box-shadow: 0 0 0 4px rgba(47,95,126,.08) !important;
+        }
+
         div[data-testid="stDataFrame"] {
-            border-radius: 18px;
+            border-radius: 22px;
             overflow: hidden;
             border: 1px solid var(--border);
-            box-shadow: 0 14px 40px rgba(16,42,67,.05);
-            background: rgba(255,255,255,.92);
+            box-shadow: var(--shadow-sm);
+            background: rgba(255,255,255,.95);
         }
-        .stPlotlyChart { padding: .2rem 0; }
+
+        .stPlotlyChart {
+            border-radius: 22px;
+            border: 1px solid var(--border);
+            background: rgba(255,255,255,.96);
+            box-shadow: var(--shadow-sm);
+            padding: .2rem .25rem;
+        }
+
+        .footer-shell {
+            margin-top: 2rem;
+            padding: 1.5rem 1rem 2.3rem;
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: .88rem;
+            border-top: 1px solid rgba(18,52,77,.1);
+        }
+
+        .footer-shell p {
+            margin: .15rem 0;
+        }
+
+        .footer-shell a {
+            color: var(--secondary);
+            text-decoration: none;
+            font-weight: 700;
+        }
+
         @keyframes rise {
             from { opacity: 0; transform: translateY(8px); }
             to { opacity: 1; transform: translateY(0); }
         }
-        @media (max-width: 980px) { .masthead-grid { grid-template-columns: 1fr; } }
+
+        @keyframes shimmer {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+
+        @media (max-width: 1080px) {
+            .ui-skeleton-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
+
+        @media (max-width: 980px) {
+            .masthead-grid { grid-template-columns: 1fr; }
+        }
+
+        @media (max-width: 768px) {
+            .block-container { padding-top: 1rem; }
+            .masthead { padding: 1.35rem 1.2rem; }
+            .masthead h1 { font-size: 1.7rem; }
+            .metric-card { min-height: 138px; }
+            .ui-skeleton-grid { grid-template-columns: 1fr; }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -532,35 +889,6 @@ def render_masthead() -> None:
         unsafe_allow_html=True,
     )
 
-
-def render_metric_card(label: str, value: str, subtitle: str) -> None:
-    st.markdown(
-        f"""
-        <div class="metric-card">
-            <div class="metric-label">{label}</div>
-            <div class="metric-value">{value}</div>
-            <div class="metric-subtitle">{subtitle}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_empty_state() -> None:
-    st.markdown(
-        """
-        <div class="empty-state">
-            <h3>Pronto para consultar o fornecedor</h3>
-            <p>
-                Informe o CNPJ no menu lateral, opcionalmente aplique um recorte temporal e execute a busca.
-                O painel consolida metricas, distribuicoes, evolucao temporal, base completa e exportacoes.
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 def render_filter_summary(
     cnpj: str,
     supplier_name: str,
@@ -826,13 +1154,15 @@ def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
 def render_sidebar() -> tuple[bool, str, date | None, date | None]:
     with st.sidebar:
         st.markdown("## Consulta do fornecedor")
-        st.caption("Use o CNPJ da empresa para localizar contratos e empenhos indexados no portal.")
+        st.caption("Informe o CNPJ e, se quiser, aplique um recorte temporal para leitura operacional.")
 
         with st.form("search_form", clear_on_submit=False):
+            st.markdown("**CNPJ do fornecedor**")
             cnpj_input = st.text_input(
                 "CNPJ",
                 placeholder="00.000.000/0000-00",
                 help="Aceita entrada com ou sem pontuacao.",
+                label_visibility="collapsed",
             )
 
             use_period_filter = st.toggle(
@@ -849,22 +1179,37 @@ def render_sidebar() -> tuple[bool, str, date | None, date | None]:
                 default_start = date(today.year - 1, 1, 1)
                 period_col_1, period_col_2 = st.columns(2)
                 with period_col_1:
-                    start_date = st.date_input("Inicial", value=default_start, format="DD/MM/YYYY")
+                    st.caption("Inicial")
+                    start_date = st.date_input(
+                        "Inicial",
+                        value=default_start,
+                        format="DD/MM/YYYY",
+                        label_visibility="collapsed",
+                    )
                 with period_col_2:
-                    end_date = st.date_input("Final", value=today, format="DD/MM/YYYY")
+                    st.caption("Final")
+                    end_date = st.date_input(
+                        "Final",
+                        value=today,
+                        format="DD/MM/YYYY",
+                        label_visibility="collapsed",
+                    )
 
             submitted = st.form_submit_button("Buscar contratos", use_container_width=True)
 
         st.markdown("---")
         st.markdown("### Fonte")
-        st.caption(
-            "Painel baseado na busca publica do PNCP e no endpoint oficial de detalhe de contratos."
+        st.caption("Busca publica do portal PNCP com enriquecimento no endpoint oficial de detalhe.")
+        st.markdown(
+            """
+            - Portal: `pncp.gov.br`
+            - Atualizacao: tempo real
+            - Exportacao: Excel e CSV
+            """
         )
 
         st.markdown("### Notas operacionais")
-        st.caption(
-            "A primeira consulta pode levar alguns segundos, dependendo do volume paginado e da resposta do portal."
-        )
+        st.caption("A primeira busca pode levar alguns segundos por causa da paginacao e do cache inicial.")
 
     return submitted, cnpj_input, start_date, end_date
 
@@ -877,15 +1222,15 @@ def initialize_state() -> None:
 def run_search(cnpj_input: str, start_date: date | None, end_date: date | None) -> None:
     cnpj = format_cnpj(cnpj_input)
     if not cnpj:
-        st.error("Informe um CNPJ para iniciar a consulta.")
+        ui_alert("error", "Informe um CNPJ para iniciar a consulta.")
         st.stop()
 
     if not validate_cnpj(cnpj):
-        st.error("O CNPJ informado e invalido. Revise os digitos e tente novamente.")
+        ui_alert("error", "O CNPJ informado e invalido. Revise os digitos e tente novamente.")
         st.stop()
 
     if start_date and end_date and start_date > end_date:
-        st.error("A data inicial nao pode ser posterior a data final.")
+        ui_alert("error", "A data inicial nao pode ser posterior a data final.")
         st.stop()
 
     with st.spinner(f"Consultando contratos do fornecedor {format_cnpj_display(cnpj)}..."):
@@ -921,27 +1266,30 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
     )
 
     if meta.get("sample_checked", 0) > 0 and not meta.get("sample_exact_match", True):
-        st.warning(
-            "A amostra verificada nao confirmou todos os contratos no CNPJ informado. Revise manualmente antes de usar a base para decisao."
+        ui_alert(
+            "warning",
+            "A amostra verificada nao confirmou todos os contratos no CNPJ informado. Revise manualmente antes de usar a base para decisao.",
         )
 
     if df.empty:
-        st.warning("Nenhum contrato foi localizado para o CNPJ informado.")
+        ui_empty_state(
+            icon="📭",
+            title="Nenhum contrato encontrado",
+            message="Nao localizamos contratos para este CNPJ no indice publico do PNCP.",
+            badges=["Revise o CNPJ", "Tente novamente mais tarde", "Verifique a indexacao no portal"],
+        )
         return
 
     orgao_options = sorted(df["orgao_nome"].dropna().unique().tolist())
     year_options = sorted([int(year) for year in df["ano"].dropna().unique().tolist()], reverse=True)
     situation_options = sorted(df["situacao_nome"].dropna().unique().tolist())
 
-    st.markdown("<div class='filter-card'>", unsafe_allow_html=True)
-    st.markdown(
-        """
-        <p class="section-title">Filtros dinamicos da superficie analitica</p>
-        <p class="section-copy">Os filtros abaixo refinam todos os graficos, metricas, tabela e exportacoes.</p>
-        """,
-        unsafe_allow_html=True,
+    section_header(
+        "Filtros dinamicos da analise",
+        "Todos os graficos, metricas, exportacoes e a tabela respondem aos recortes abaixo.",
+        icon="🎛️",
     )
-
+    st.markdown("<div class='filter-card'>", unsafe_allow_html=True)
     filter_col_1, filter_col_2, filter_col_3 = st.columns(3)
     with filter_col_1:
         selected_orgaos = st.multiselect("Orgao", options=orgao_options, default=[])
@@ -961,7 +1309,12 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
     )
 
     if filtered_df.empty:
-        st.warning("Os filtros aplicados nao retornaram contratos. Ajuste os recortes para continuar.")
+        ui_empty_state(
+            icon="🧭",
+            title="Sem resultados neste recorte",
+            message="Os filtros atuais removeram todos os contratos da visualizacao. Ajuste os recortes para continuar.",
+            badges=["Amplie o periodo", "Remova um filtro", "Troque o orgao"],
+        )
         return
 
     total_contracts = len(filtered_df)
@@ -972,15 +1325,15 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
 
     metric_col_1, metric_col_2, metric_col_3, metric_col_4, metric_col_5 = st.columns(5)
     with metric_col_1:
-        render_metric_card("Contratos", format_integer(total_contracts), "Base filtrada")
+        ui_metric_card("Contratos", format_integer(total_contracts), icon="📄", delta="Base filtrada")
     with metric_col_2:
-        render_metric_card("Valor total", format_currency(total_value), "Soma da carteira")
+        ui_metric_card("Valor total", format_currency(total_value), icon="💰", delta="Soma da carteira")
     with metric_col_3:
-        render_metric_card("Valor medio", format_currency(average_value), "Ticket medio")
+        ui_metric_card("Valor medio", format_currency(average_value), icon="📈", delta="Ticket medio")
     with metric_col_4:
-        render_metric_card("Orgaos", format_integer(unique_organs), "Relacionamentos distintos")
+        ui_metric_card("Orgaos", format_integer(unique_organs), icon="🏛️", delta="Relacionamentos distintos")
     with metric_col_5:
-        render_metric_card("Anos cobertos", format_integer(years_covered), "Historico visivel")
+        ui_metric_card("Anos cobertos", format_integer(years_covered), icon="🗓️", delta="Historico visivel")
 
     tab_1, tab_2, tab_3, tab_4, tab_5 = st.tabs(
         [
@@ -995,11 +1348,19 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
     with tab_1:
         exec_col_1, exec_col_2 = st.columns([1.5, 1])
         with exec_col_1:
-            st.markdown("#### Top orgaos por valor contratado")
-            st.plotly_chart(build_top_orgs_chart(filtered_df), use_container_width=True)
+            chart_wrapper(
+                build_top_orgs_chart(filtered_df),
+                "Top orgaos por valor contratado",
+                "Mapa de concentracao financeira por contratante.",
+                icon="🏛️",
+            )
         with exec_col_2:
-            st.markdown("#### Situacao das contratacoes")
-            st.plotly_chart(build_status_donut(filtered_df), use_container_width=True)
+            chart_wrapper(
+                build_status_donut(filtered_df),
+                "Situacao das contratacoes",
+                "Distribuicao das publicacoes por status do portal.",
+                icon="📌",
+            )
 
         summary = (
             filtered_df.groupby("tipo_contrato_nome", dropna=False)
@@ -1008,7 +1369,11 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
             .sort_values(["quantidade", "valor_total"], ascending=[False, False])
         )
         summary["valor_total"] = summary["valor_total"].apply(format_currency)
-        st.markdown("#### Resumo por tipo contratual")
+        section_header(
+            "Resumo por tipo contratual",
+            "Visao consolidada do mix entre contratos, cartas e empenhos.",
+            icon="📦",
+        )
         st.dataframe(
             summary.rename(
                 columns={
@@ -1024,11 +1389,19 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
     with tab_2:
         timeline_col_1, timeline_col_2 = st.columns([1.5, 1])
         with timeline_col_1:
-            st.markdown("#### Evolucao mensal")
-            st.plotly_chart(build_timeline_chart(filtered_df), use_container_width=True)
+            chart_wrapper(
+                build_timeline_chart(filtered_df),
+                "Evolucao mensal",
+                "Valor total e volume contratual por mes de referencia.",
+                icon="📆",
+            )
         with timeline_col_2:
-            st.markdown("#### Volume anual")
-            st.plotly_chart(build_yearly_chart(filtered_df), use_container_width=True)
+            chart_wrapper(
+                build_yearly_chart(filtered_df),
+                "Volume anual",
+                "Leitura compacta da intensidade de contratacao por ano.",
+                icon="📊",
+            )
 
         organ_summary = (
             filtered_df.groupby(["orgao_nome", "uf"], dropna=False)
@@ -1038,7 +1411,11 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
             .head(15)
         )
         organ_summary["valor_total"] = organ_summary["valor_total"].apply(format_currency)
-        st.markdown("#### Ranking consolidado de orgaos")
+        section_header(
+            "Ranking consolidado de orgaos",
+            "Tabela operacional para identificar os principais compradores.",
+            icon="📋",
+        )
         st.dataframe(
             organ_summary.rename(
                 columns={
@@ -1053,7 +1430,11 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
         )
 
     with tab_3:
-        st.markdown("#### Relacao completa de contratos filtrados")
+        section_header(
+            "Relacao completa de contratos filtrados",
+            "Tabela paginada para revisao detalhada e abertura direta no portal.",
+            icon="🔎",
+        )
 
         table_df = filtered_df[
             [
@@ -1074,8 +1455,10 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
         table_df["valor_global"] = table_df["valor_global"].apply(format_currency)
         table_df["data_assinatura"] = table_df["data_assinatura"].dt.strftime("%d/%m/%Y").fillna("N/A")
 
+        paged_table_df = paginated_table(table_df, key="contracts_table", rows_per_page=25)
+
         st.dataframe(
-            table_df.rename(
+            paged_table_df.rename(
                 columns={
                     "numero_controle_pncp": "Numero PNCP",
                     "titulo": "Titulo",
@@ -1105,17 +1488,29 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
     with tab_4:
         dist_col_1, dist_col_2 = st.columns(2)
         with dist_col_1:
-            st.markdown("#### Histograma de valores")
-            st.plotly_chart(build_value_histogram(filtered_df), use_container_width=True)
+            chart_wrapper(
+                build_value_histogram(filtered_df),
+                "Histograma de valores",
+                "Distribuicao dos tickets contratuais em faixas continuas.",
+                icon="📶",
+            )
         with dist_col_2:
-            st.markdown("#### Boxplot dos valores")
-            st.plotly_chart(build_value_boxplot(filtered_df), use_container_width=True)
+            chart_wrapper(
+                build_value_boxplot(filtered_df),
+                "Boxplot dos valores",
+                "Amplitude, mediana e outliers da carteira filtrada.",
+                icon="📉",
+            )
 
         bands_df = build_value_bands(filtered_df)
         bands_df["valor_total"] = bands_df["valor_total"].apply(format_currency)
         bands_df["valor_medio"] = bands_df["valor_medio"].apply(format_currency)
         bands_df["participacao"] = bands_df["participacao"].map(lambda value: f"{value:.1f}%")
-        st.markdown("#### Faixas de valor")
+        section_header(
+            "Faixas de valor",
+            "Leitura direta da composicao da carteira por bandas financeiras.",
+            icon="💹",
+        )
         st.dataframe(
             bands_df.rename(
                 columns={
@@ -1131,7 +1526,11 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
         )
 
     with tab_5:
-        st.markdown("#### Exportar base filtrada")
+        section_header(
+            "Exportar base filtrada",
+            "Leve a base tratada para analise externa ou consolidacao interna.",
+            icon="⬇️",
+        )
         export_df = filtered_df.copy()
         export_df["data_assinatura"] = export_df["data_assinatura"].dt.strftime("%Y-%m-%d")
         export_df["data_publicacao_pncp"] = export_df["data_publicacao_pncp"].dt.strftime("%Y-%m-%d")
@@ -1160,7 +1559,7 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
             )
             st.caption("Arquivo UTF-8 com separador ponto e virgula.")
 
-        st.markdown("#### Links uteis")
+        section_header("Links uteis", "Atalhos para conferencia no portal e documentacao publica.", icon="🔗")
         st.markdown(
             f"""
             - [Abrir consulta do fornecedor no portal]({APP_BASE_URL}/buscar/todos?q={meta.get('cnpj', '')}&pagina=1)
@@ -1169,20 +1568,30 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
             """
         )
 
-    st.caption(
-        f"Ultima atualizacao local: {meta.get('fetched_at', '-')}. Filtros aplicados sobre a base retornada pelo portal do PNCP."
+    footer_block(
+        repo_url=REPO_URL,
+        timestamp=meta.get("fetched_at", "-"),
     )
 
 
 def render_initial_screen() -> None:
-    render_empty_state()
+    ui_empty_state(
+        icon="🔎",
+        title="Pronto para consultar o fornecedor",
+        message="Informe o CNPJ no menu lateral, execute a busca e navegue por metricas, series temporais, base completa e exportacoes.",
+        badges=["Busca por CNPJ", "Graficos interativos", "Exportacao imediata"],
+    )
 
     info_col_1, info_col_2 = st.columns(2)
     with info_col_1:
+        section_header(
+            "O que este painel entrega",
+            "Uma superficie de trabalho orientada a leitura operacional, nao so uma vitrine de dados.",
+            icon="🧩",
+        )
         st.markdown(
             """
             <div class="info-card">
-                <p class="section-title">O que este painel entrega</p>
                 <p class="section-copy">
                     Busca por CNPJ, paginacao automatica, validacao do documento, visao executiva,
                     recortes por orgao/ano/situacao, base clicavel e exportacao.
@@ -1197,10 +1606,14 @@ def render_initial_screen() -> None:
             unsafe_allow_html=True,
         )
     with info_col_2:
+        section_header(
+            "Fluxo recomendado",
+            "Passos curtos para chegar da consulta bruta a uma base pronta para compartilhar.",
+            icon="🧭",
+        )
         st.markdown(
             """
             <div class="info-card">
-                <p class="section-title">Fluxo recomendado</p>
                 <p class="section-copy">
                     1. Informe o CNPJ do fornecedor. 2. Defina periodo, se quiser um recorte.
                     3. Execute a busca. 4. Refine os filtros dinamicos. 5. Exporte a base final.
@@ -1224,21 +1637,28 @@ def main() -> None:
     submitted, cnpj_input, start_date, end_date = render_sidebar()
 
     if submitted:
+        loading_placeholder = st.empty()
+        with loading_placeholder.container():
+            render_loading_skeleton()
         try:
             run_search(cnpj_input, start_date, end_date)
         except PncpApiError as exc:
-            st.error(str(exc))
+            loading_placeholder.empty()
+            ui_alert("error", str(exc))
             st.stop()
+        loading_placeholder.empty()
 
     contracts_df = st.session_state.get("contracts_df")
     query_meta = st.session_state.get("query_meta", {})
 
     if contracts_df is None:
         render_initial_screen()
+        footer_block(repo_url=REPO_URL, timestamp=datetime.now().strftime("%d/%m/%Y %H:%M"))
         return
 
     if contracts_df.empty:
-        st.warning("Nenhum contrato foi encontrado para o CNPJ informado.")
+        ui_alert("warning", "Nenhum contrato foi encontrado para o CNPJ informado.")
+        footer_block(repo_url=REPO_URL, timestamp=datetime.now().strftime("%d/%m/%Y %H:%M"))
         return
 
     render_dashboard(contracts_df, query_meta)
