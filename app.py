@@ -163,6 +163,7 @@ def load_css() -> None:
             font-weight: 800;
             letter-spacing: .1em;
             text-transform: uppercase;
+            color: rgba(255,255,255,.96);
         }
 
         .masthead h1 {
@@ -171,6 +172,7 @@ def load_css() -> None:
             line-height: 1.02;
             letter-spacing: -.03em;
             font-weight: 800;
+            color: #ffffff !important;
         }
 
         .masthead p {
@@ -178,7 +180,7 @@ def load_css() -> None:
             max-width: 62ch;
             font-size: 1rem;
             line-height: 1.62;
-            color: rgba(255,255,255,.86);
+            color: rgba(255,255,255,.88) !important;
         }
 
         .masthead-note {
@@ -196,12 +198,14 @@ def load_css() -> None:
             letter-spacing: .08em;
             text-transform: uppercase;
             opacity: .82;
+            color: #ffffff;
         }
 
         .masthead-note span {
             display: block;
             line-height: 1.55;
             font-size: .98rem;
+            color: #ffffff;
         }
 
         .info-card,
@@ -524,6 +528,13 @@ def load_css() -> None:
             padding: .74rem 1rem;
             box-shadow: 0 14px 30px rgba(193,123,45,.24);
             transition: var(--transition);
+        }
+
+        .stButton > button p,
+        .stDownloadButton > button p,
+        .stFormSubmitButton > button p {
+            color: #ffffff !important;
+            margin: 0;
         }
 
         .stButton > button:focus,
@@ -1119,9 +1130,6 @@ def build_top_orgs_chart(df: pd.DataFrame) -> go.Figure:
         y=grouped["orgao_curto"],
         orientation="h",
         marker=dict(color=COLOR_PRIMARY, line=dict(color="#0F3044", width=0)),
-        text=grouped["valor_label"],
-        textposition="outside",
-        cliponaxis=False,
         customdata=grouped[["orgao_nome", "qtd_label", "valor_label"]],
         hovertemplate=(
             "<b>%{customdata[0]}</b><br>"
@@ -1158,9 +1166,6 @@ def build_status_chart(df: pd.DataFrame) -> go.Figure:
         marker=dict(
             color=[COLOR_PRIMARY if index == len(grouped) - 1 else COLOR_PRIMARY_SOFT for index in range(len(grouped))]
         ),
-        text=grouped["qtd_label"],
-        textposition="outside",
-        cliponaxis=False,
         customdata=grouped[["situacao_nome", "qtd_label", "valor_label"]],
         hovertemplate=(
             "<b>%{customdata[0]}</b><br>"
