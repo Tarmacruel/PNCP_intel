@@ -38,12 +38,22 @@ DETAIL_API_BASE = "https://pncp.gov.br/api/pncp/v1/orgaos"
 APP_BASE_URL = "https://pncp.gov.br/app"
 REPO_URL = "https://github.com/Tarmacruel/PNCP_intel"
 CACHE_TTL_SECONDS = 3600
-DEFAULT_PAGE_SIZE = 100
+SEARCH_WINDOW_LIMIT = 10000
+DEFAULT_PAGE_SIZE = SEARCH_WINDOW_LIMIT
 MAX_RETRIES = 4
 DEFAULT_SORT = "-data"
-HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
-COLOR_PRIMARY = "#0B4F6C"
-COLOR_ACCENT = "#C07A2C"
+ASCENDING_SORT = "data"
+HTTP_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
+COLOR_PRIMARY = "#14526E"
+COLOR_PRIMARY_SOFT = "#72A8C4"
+COLOR_ACCENT = "#C68432"
+COLOR_ACCENT_SOFT = "#E8BE86"
+COLOR_SUCCESS = "#2F8F66"
+COLOR_TEXT = "#163348"
+COLOR_SUBTEXT = "#5D7185"
+COLOR_GRID = "rgba(22, 51, 72, 0.10)"
+COLOR_AXIS = "rgba(22, 51, 72, 0.18)"
+COLOR_SURFACE = "#FFFFFF"
 
 
 class PncpApiError(RuntimeError):
@@ -473,6 +483,8 @@ def load_css() -> None:
             gap: .5rem;
             padding-bottom: .3rem;
             margin-bottom: .35rem;
+            overflow-x: auto;
+            scrollbar-width: none;
         }
 
         .stTabs [data-baseweb="tab"] {
@@ -483,12 +495,21 @@ def load_css() -> None:
             border: 1px solid var(--border);
             color: var(--text-secondary);
             font-weight: 700;
+            transition: var(--transition);
+            white-space: nowrap;
+        }
+
+        .stTabs [data-baseweb="tab"]:hover {
+            border-color: rgba(18,52,77,.18);
+            color: var(--text-primary);
+            transform: translateY(-1px);
         }
 
         .stTabs [aria-selected="true"] {
             color: var(--primary) !important;
             border-color: rgba(18,52,77,.22);
             box-shadow: 0 12px 26px rgba(17,40,59,.08);
+            background: rgba(255,255,255,.98);
         }
 
         .stButton > button,
@@ -503,6 +524,13 @@ def load_css() -> None:
             padding: .74rem 1rem;
             box-shadow: 0 14px 30px rgba(193,123,45,.24);
             transition: var(--transition);
+        }
+
+        .stButton > button:focus,
+        .stDownloadButton > button:focus,
+        .stFormSubmitButton > button:focus {
+            outline: none !important;
+            box-shadow: 0 0 0 4px rgba(193,123,45,.16), 0 14px 30px rgba(193,123,45,.24) !important;
         }
 
         .stButton > button:hover,
@@ -544,9 +572,16 @@ def load_css() -> None:
         .stPlotlyChart {
             border-radius: 22px;
             border: 1px solid var(--border);
-            background: rgba(255,255,255,.96);
+            background: linear-gradient(180deg, rgba(255,255,255,.98), rgba(250,252,255,.96));
             box-shadow: var(--shadow-sm);
-            padding: .2rem .25rem;
+            padding: .35rem .45rem;
+            transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+        }
+
+        .stPlotlyChart:hover {
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-md);
+            border-color: rgba(18,52,77,.16);
         }
 
         .footer-shell {
@@ -590,7 +625,17 @@ def load_css() -> None:
             .block-container { padding-top: 1rem; }
             .masthead { padding: 1.35rem 1.2rem; }
             .masthead h1 { font-size: 1.7rem; }
+            .masthead p { font-size: .94rem; }
+            .masthead-note { padding: .9rem .95rem; border-radius: 16px; }
             .metric-card { min-height: 138px; }
+            .metric-value { font-size: 1.45rem; }
+            .info-card, .filter-card { padding: .9rem .95rem; }
+            .section-copy { font-size: .88rem; }
+            .section-heading { font-size: 1rem; }
+            .stTabs [data-baseweb="tab"] { padding: .62rem .92rem; font-size: .86rem; }
+            .stPlotlyChart { border-radius: 18px; padding: .2rem .2rem; }
+            div[data-testid="stDataFrame"] { border-radius: 18px; }
+            .table-toolbar { gap: .35rem; }
             .ui-skeleton-grid { grid-template-columns: 1fr; }
         }
         </style>
@@ -640,6 +685,11 @@ def format_integer(value: int | float | None) -> str:
     return f"{int(value):,}".replace(",", ".")
 
 
+def extract_error_message(response: httpx.Response) -> str:
+    raw_text = response.text.strip().strip('"')
+    return raw_text[:180] if raw_text else "Resposta vazia"
+
+
 def request_json(client: httpx.Client, url: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
     last_error: Exception | None = None
 
@@ -664,7 +714,10 @@ def request_json(client: httpx.Client, url: str, *, params: dict[str, Any] | Non
             status_code = exc.response.status_code if is_http_error and exc.response is not None else None
 
             if status_code and status_code < 500 and status_code not in {408, 429}:
-                raise PncpApiError(f"Erro definitivo do PNCP ({status_code}) ao consultar {url}.") from exc
+                response_message = extract_error_message(exc.response) if exc.response is not None else "Sem detalhe"
+                raise PncpApiError(
+                    f"Erro definitivo do PNCP ({status_code}) ao consultar {url}: {response_message}."
+                ) from exc
 
             if attempt == MAX_RETRIES:
                 break
@@ -702,16 +755,18 @@ def fetch_contract_detail(item_url: str) -> dict[str, Any]:
         return request_json(client, url)
 
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
-def fetch_contract_search(cnpj: str) -> dict[str, Any]:
-    params = {
+def build_search_params(cnpj: str, *, sort: str) -> dict[str, Any]:
+    return {
         "q": cnpj,
         "tipos_documento": "contrato",
-        "ordenacao": DEFAULT_SORT,
+        "ordenacao": sort,
         "pagina": 1,
         "tam_pagina": DEFAULT_PAGE_SIZE,
     }
 
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def fetch_contract_search(cnpj: str) -> dict[str, Any]:
     all_items: list[dict[str, Any]] = []
 
     with httpx.Client(
@@ -719,16 +774,31 @@ def fetch_contract_search(cnpj: str) -> dict[str, Any]:
         follow_redirects=True,
         headers={"User-Agent": f"{APP_TITLE}/1.0"},
     ) as client:
-        first_payload = request_json(client, SEARCH_API_URL, params=params)
-        first_items = first_payload.get("items", []) or []
-        total_records = int(first_payload.get("total") or len(first_items))
+        recent_payload = request_json(
+            client,
+            SEARCH_API_URL,
+            params=build_search_params(cnpj, sort=DEFAULT_SORT),
+        )
+        recent_items = recent_payload.get("items", []) or []
+        total_records = int(recent_payload.get("total") or len(recent_items))
         total_pages = max(1, math.ceil(total_records / DEFAULT_PAGE_SIZE)) if total_records else 1
-        all_items.extend(first_items)
+        all_items.extend(recent_items)
 
-        for page in range(2, total_pages + 1):
-            params["pagina"] = page
-            payload = request_json(client, SEARCH_API_URL, params=params)
-            all_items.extend(payload.get("items", []) or [])
+        search_strategy = "janela_unica"
+        retrieved_windows = 1
+
+        # O endpoint de busca do PNCP permite no maximo uma janela de 10 mil resultados por ordenacao.
+        # Para carteiras entre 10.001 e 20.000 itens, abrimos a janela espelhada em ordem crescente
+        # e unimos as duas pontas do indice.
+        if total_records > SEARCH_WINDOW_LIMIT:
+            oldest_payload = request_json(
+                client,
+                SEARCH_API_URL,
+                params=build_search_params(cnpj, sort=ASCENDING_SORT),
+            )
+            all_items.extend(oldest_payload.get("items", []) or [])
+            search_strategy = "janela_dupla"
+            retrieved_windows = 2
 
     deduplicated_items: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
@@ -742,7 +812,8 @@ def fetch_contract_search(cnpj: str) -> dict[str, Any]:
     supplier_name = None
     sample_checked = 0
     sample_exact_match = True
-    for sample_item in deduplicated_items[:5]:
+    sample_indexes = {0, 1, 2, max(len(deduplicated_items) - 3, 0), max(len(deduplicated_items) - 1, 0)}
+    for sample_item in [deduplicated_items[index] for index in sorted(sample_indexes) if index < len(deduplicated_items)]:
         detail = fetch_contract_detail(sample_item.get("item_url", ""))
         if not detail:
             continue
@@ -751,10 +822,17 @@ def fetch_contract_search(cnpj: str) -> dict[str, Any]:
         if detail.get("niFornecedor") != cnpj:
             sample_exact_match = False
 
+    retrieved_records = len(deduplicated_items)
+    is_partial = total_records > (SEARCH_WINDOW_LIMIT * retrieved_windows) and retrieved_records < total_records
+
     return {
         "items": deduplicated_items,
         "total_records": total_records,
         "total_pages": total_pages,
+        "retrieved_records": retrieved_records,
+        "search_strategy": search_strategy,
+        "retrieved_windows": retrieved_windows,
+        "is_partial": is_partial,
         "supplier_name": supplier_name,
         "sample_checked": sample_checked,
         "sample_exact_match": sample_exact_match,
@@ -893,10 +971,13 @@ def render_filter_summary(
     cnpj: str,
     supplier_name: str,
     total_records: int,
+    retrieved_records: int,
     start_date: date | None,
     end_date: date | None,
     sample_checked: int,
     sample_exact_match: bool,
+    search_strategy: str,
+    is_partial: bool,
 ) -> None:
     if start_date and end_date:
         period_label = f"{start_date.strftime('%d/%m/%Y')} ate {end_date.strftime('%d/%m/%Y')}"
@@ -912,6 +993,17 @@ def render_filter_summary(
     else:
         quality_label = "Verificacao amostral ok" if sample_exact_match else "Indice exige revisao manual"
 
+    if search_strategy == "janela_dupla":
+        strategy_label = "Cobertura bidirecional do indice"
+    else:
+        strategy_label = "Janela unica do indice"
+
+    coverage_label = (
+        f"Base recuperada: {format_integer(retrieved_records)} de {format_integer(total_records)}"
+        if is_partial
+        else f"Base recuperada: {format_integer(retrieved_records)} contratos"
+    )
+
     st.markdown(
         f"""
         <div class="info-card">
@@ -921,6 +1013,8 @@ def render_filter_summary(
             </p>
             <div class="pill-row">
                 <span class="pill">Periodo: {period_label}</span>
+                <span class="pill">{strategy_label}</span>
+                <span class="pill">{coverage_label}</span>
                 <span class="pill">Recorte amostral: {sample_checked} contrato(s)</span>
                 <span class="pill">{quality_label}</span>
             </div>
@@ -930,71 +1024,154 @@ def render_filter_summary(
     )
 
 
+def shorten_label(value: str, *, limit: int = 44) -> str:
+    if not value:
+        return "Nao informado"
+    compact = " ".join(str(value).split())
+    return compact if len(compact) <= limit else f"{compact[: limit - 1]}…"
+
+
+def build_empty_chart(message: str) -> go.Figure:
+    fig = go.Figure()
+    fig.add_annotation(
+        text=message,
+        showarrow=False,
+        x=0.5,
+        y=0.5,
+        xref="paper",
+        yref="paper",
+        font=dict(family="Manrope, sans-serif", size=14, color=COLOR_SUBTEXT),
+    )
+    fig.update_xaxes(visible=False)
+    fig.update_yaxes(visible=False)
+    fig.update_layout(
+        height=360,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor=COLOR_SURFACE,
+        margin=dict(l=16, r=16, t=16, b=16),
+    )
+    return fig
+
+
+def apply_chart_theme(fig: go.Figure, *, height: int, hovermode: str = "closest") -> go.Figure:
+    fig.update_layout(
+        height=height,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor=COLOR_SURFACE,
+        margin=dict(l=18, r=18, t=20, b=12),
+        font=dict(family="Manrope, sans-serif", size=13, color=COLOR_TEXT),
+        hovermode=hovermode,
+        hoverlabel=dict(
+            bgcolor="#0F2434",
+            bordercolor="rgba(255,255,255,0.16)",
+            font=dict(family="Manrope, sans-serif", size=12, color="white"),
+        ),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0,
+            title_text="",
+            font=dict(size=12, color=COLOR_SUBTEXT),
+        ),
+    )
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor=COLOR_GRID,
+        linecolor=COLOR_AXIS,
+        tickfont=dict(color=COLOR_SUBTEXT, size=11),
+        title_font=dict(color=COLOR_SUBTEXT, size=12),
+        zeroline=False,
+        automargin=True,
+    )
+    fig.update_yaxes(
+        showgrid=True,
+        gridcolor=COLOR_GRID,
+        linecolor=COLOR_AXIS,
+        tickfont=dict(color=COLOR_SUBTEXT, size=11),
+        title_font=dict(color=COLOR_SUBTEXT, size=12),
+        zeroline=False,
+        automargin=True,
+    )
+    return fig
+
+
 def build_top_orgs_chart(df: pd.DataFrame) -> go.Figure:
     grouped = (
         df.groupby("orgao_nome", dropna=False)
         .agg(quantidade=("numero_controle_pncp", "count"), valor_total=("valor_global", "sum"))
         .reset_index()
         .sort_values("valor_total", ascending=False)
-        .head(12)
+        .head(10)
         .sort_values("valor_total", ascending=True)
     )
+    if grouped.empty:
+        return build_empty_chart("Sem dados suficientes para montar o ranking de orgaos.")
 
-    fig = px.bar(
-        grouped,
-        x="valor_total",
-        y="orgao_nome",
+    grouped["orgao_curto"] = grouped["orgao_nome"].apply(shorten_label)
+    grouped["valor_label"] = grouped["valor_total"].apply(format_currency)
+    grouped["qtd_label"] = grouped["quantidade"].apply(format_integer)
+
+    fig = go.Figure()
+    fig.add_bar(
+        x=grouped["valor_total"],
+        y=grouped["orgao_curto"],
         orientation="h",
-        text="quantidade",
-        color="valor_total",
-        color_continuous_scale=["#D9EAF3", COLOR_PRIMARY],
-        labels={"valor_total": "Valor total", "orgao_nome": "Orgao"},
-    )
-    fig.update_traces(
-        texttemplate="%{text} itens",
+        marker=dict(color=COLOR_PRIMARY, line=dict(color="#0F3044", width=0)),
+        text=grouped["valor_label"],
         textposition="outside",
-        hovertemplate="<b>%{y}</b><br>Valor total: %{x:$,.2f}<br>Quantidade: %{text}<extra></extra>",
+        cliponaxis=False,
+        customdata=grouped[["orgao_nome", "qtd_label", "valor_label"]],
+        hovertemplate=(
+            "<b>%{customdata[0]}</b><br>"
+            "Valor total: %{customdata[2]}<br>"
+            "Qtd. contratos: %{customdata[1]}<extra></extra>"
+        ),
     )
-    fig.update_layout(
-        height=520,
-        showlegend=False,
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        coloraxis_showscale=False,
-        margin=dict(l=0, r=0, t=20, b=0),
-        xaxis_title="Valor total (R$)",
-        yaxis_title="",
-    )
+    apply_chart_theme(fig, height=480)
+    fig.update_layout(showlegend=False, bargap=0.24)
+    fig.update_xaxes(title="Valor total contratado", tickprefix="R$ ")
+    fig.update_yaxes(title="", showgrid=False)
     return fig
 
 
-def build_status_donut(df: pd.DataFrame) -> go.Figure:
+def build_status_chart(df: pd.DataFrame) -> go.Figure:
     grouped = (
         df.groupby("situacao_nome", dropna=False)
         .agg(quantidade=("numero_controle_pncp", "count"), valor_total=("valor_global", "sum"))
         .reset_index()
-        .sort_values("quantidade", ascending=False)
+        .sort_values("quantidade", ascending=True)
     )
+    if grouped.empty:
+        return build_empty_chart("Sem status publicados para exibir.")
 
-    fig = px.pie(
-        grouped,
-        names="situacao_nome",
-        values="quantidade",
-        hole=0.62,
-        color_discrete_sequence=[COLOR_PRIMARY, COLOR_ACCENT, "#5D7A8C", "#8FB8D8", "#D6A96A"],
+    grouped["situacao_curta"] = grouped["situacao_nome"].apply(lambda value: shorten_label(value, limit=28))
+    grouped["qtd_label"] = grouped["quantidade"].apply(format_integer)
+    grouped["valor_label"] = grouped["valor_total"].apply(format_currency)
+
+    fig = go.Figure()
+    fig.add_bar(
+        x=grouped["quantidade"],
+        y=grouped["situacao_curta"],
+        orientation="h",
+        marker=dict(
+            color=[COLOR_PRIMARY if index == len(grouped) - 1 else COLOR_PRIMARY_SOFT for index in range(len(grouped))]
+        ),
+        text=grouped["qtd_label"],
+        textposition="outside",
+        cliponaxis=False,
+        customdata=grouped[["situacao_nome", "qtd_label", "valor_label"]],
+        hovertemplate=(
+            "<b>%{customdata[0]}</b><br>"
+            "Qtd. contratos: %{customdata[1]}<br>"
+            "Valor total: %{customdata[2]}<extra></extra>"
+        ),
     )
-    fig.update_traces(
-        textposition="inside",
-        textinfo="percent",
-        hovertemplate="<b>%{label}</b><br>Contratos: %{value}<br>Participacao: %{percent}<extra></extra>",
-    )
-    fig.update_layout(
-        height=440,
-        paper_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=0, r=0, t=20, b=0),
-        showlegend=True,
-        legend_title_text="Situacao",
-    )
+    apply_chart_theme(fig, height=480)
+    fig.update_layout(showlegend=False, bargap=0.3)
+    fig.update_xaxes(title="Quantidade de contratos")
+    fig.update_yaxes(title="", showgrid=False)
     return fig
 
 
@@ -1006,35 +1183,47 @@ def build_timeline_chart(df: pd.DataFrame) -> go.Figure:
         .reset_index()
         .sort_values("mes_ano")
     )
+    if monthly.empty:
+        return build_empty_chart("Nao ha serie temporal suficiente para este recorte.")
+
+    monthly["valor_label"] = monthly["valor_total"].apply(format_currency)
+    monthly["qtd_label"] = monthly["quantidade"].apply(format_integer)
 
     fig = go.Figure()
-    fig.add_bar(
+    fig.add_scatter(
         x=monthly["mes_ano"],
         y=monthly["valor_total"],
         name="Valor total",
-        marker_color=COLOR_PRIMARY,
-        opacity=0.9,
-        hovertemplate="%{x|%m/%Y}<br>Valor total: %{y:$,.2f}<extra></extra>",
+        mode="lines+markers",
+        line=dict(color=COLOR_PRIMARY, width=3),
+        marker=dict(size=7, color=COLOR_PRIMARY),
+        fill="tozeroy",
+        fillcolor="rgba(20, 82, 110, 0.10)",
+        customdata=monthly[["valor_label", "qtd_label"]],
+        hovertemplate="%{x|%m/%Y}<br>Valor total: %{customdata[0]}<br>Qtd. contratos: %{customdata[1]}<extra></extra>",
     )
-    fig.add_scatter(
+    fig.add_bar(
         x=monthly["mes_ano"],
         y=monthly["quantidade"],
-        name="Quantidade",
-        mode="lines+markers",
-        line=dict(color=COLOR_ACCENT, width=3),
-        marker=dict(size=7),
+        name="Qtd. contratos",
+        marker_color="rgba(198, 132, 50, 0.70)",
         yaxis="y2",
-        hovertemplate="%{x|%m/%Y}<br>Contratos: %{y}<extra></extra>",
+        hovertemplate="%{x|%m/%Y}<br>Qtd. contratos: %{y}<extra></extra>",
     )
+    apply_chart_theme(fig, height=430, hovermode="x unified")
+    fig.update_layout(bargap=0.5)
+    fig.update_xaxes(title="Mes de referencia", tickformat="%b/%y")
+    fig.update_yaxes(title="Valor total contratado", tickprefix="R$ ", rangemode="tozero")
     fig.update_layout(
-        height=460,
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=0, r=0, t=20, b=0),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        yaxis=dict(title="Valor total (R$)", rangemode="tozero"),
-        yaxis2=dict(title="Quantidade", overlaying="y", side="right", rangemode="tozero"),
-        xaxis=dict(title="Mes de referencia"),
+        yaxis2=dict(
+            title="Qtd. contratos",
+            overlaying="y",
+            side="right",
+            rangemode="tozero",
+            showgrid=False,
+            tickfont=dict(color=COLOR_SUBTEXT, size=11),
+            title_font=dict(color=COLOR_SUBTEXT, size=12),
+        )
     )
     return fig
 
@@ -1047,66 +1236,125 @@ def build_yearly_chart(df: pd.DataFrame) -> go.Figure:
         .reset_index()
         .sort_values("ano")
     )
+    if yearly.empty:
+        return build_empty_chart("Nao ha consolidacao anual para este recorte.")
 
-    fig = px.bar(
-        yearly,
-        x="ano",
-        y="quantidade",
-        color="valor_total",
-        color_continuous_scale=["#E6EEF5", COLOR_ACCENT],
-        labels={"ano": "Ano", "quantidade": "Quantidade"},
+    yearly["ano_label"] = yearly["ano"].astype("Int64").astype(str)
+    yearly["valor_label"] = yearly["valor_total"].apply(format_currency)
+    yearly["qtd_label"] = yearly["quantidade"].apply(format_integer)
+
+    fig = go.Figure()
+    fig.add_bar(
+        x=yearly["ano_label"],
+        y=yearly["quantidade"],
+        name="Qtd. contratos",
+        marker_color=COLOR_ACCENT,
+        customdata=yearly[["valor_label", "qtd_label"]],
+        hovertemplate="%{x}<br>Qtd. contratos: %{customdata[1]}<br>Valor total: %{customdata[0]}<extra></extra>",
     )
-    fig.update_traces(
-        hovertemplate="<b>%{x}</b><br>Contratos: %{y}<br>Valor total: %{marker.color:$,.2f}<extra></extra>"
+    fig.add_scatter(
+        x=yearly["ano_label"],
+        y=yearly["valor_total"],
+        name="Valor total",
+        mode="lines+markers",
+        line=dict(color=COLOR_PRIMARY, width=3),
+        marker=dict(size=7, color=COLOR_PRIMARY),
+        yaxis="y2",
+        customdata=yearly[["valor_label", "qtd_label"]],
+        hovertemplate="%{x}<br>Valor total: %{customdata[0]}<br>Qtd. contratos: %{customdata[1]}<extra></extra>",
     )
+    apply_chart_theme(fig, height=430, hovermode="x unified")
+    fig.update_xaxes(title="Ano")
+    fig.update_yaxes(title="Qtd. contratos", rangemode="tozero")
     fig.update_layout(
-        height=420,
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        coloraxis_showscale=False,
-        margin=dict(l=0, r=0, t=20, b=0),
+        yaxis2=dict(
+            title="Valor total",
+            overlaying="y",
+            side="right",
+            rangemode="tozero",
+            showgrid=False,
+            tickprefix="R$ ",
+            tickfont=dict(color=COLOR_SUBTEXT, size=11),
+            title_font=dict(color=COLOR_SUBTEXT, size=12),
+        )
     )
     return fig
 
 
 def build_value_histogram(df: pd.DataFrame) -> go.Figure:
-    fig = px.histogram(
-        df,
-        x="valor_global",
-        nbins=30,
-        color_discrete_sequence=[COLOR_PRIMARY],
-        labels={"valor_global": "Valor global"},
+    positive_values = df["valor_global"].fillna(0).clip(lower=1)
+    if positive_values.empty:
+        return build_empty_chart("Nao ha valores para distribuir.")
+
+    histogram_df = pd.DataFrame(
+        {
+            "valor_log10": positive_values.apply(lambda value: math.log10(max(float(value), 1.0))),
+        }
     )
-    fig.update_traces(hovertemplate="Faixa: %{x}<br>Contratos: %{y}<extra></extra>")
-    fig.update_layout(
-        height=420,
-        bargap=0.08,
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=0, r=0, t=20, b=0),
-        xaxis_title="Valor global (R$)",
-        yaxis_title="Quantidade",
+
+    fig = px.histogram(
+        histogram_df,
+        x="valor_log10",
+        nbins=min(24, max(10, int(math.sqrt(len(histogram_df))))),
+        color_discrete_sequence=[COLOR_PRIMARY],
+    )
+    apply_chart_theme(fig, height=410)
+    fig.update_layout(bargap=0.08, showlegend=False)
+    fig.update_xaxes(
+        title="Faixas de valor em escala logaritmica",
+        tickvals=[3, 4, 5, 6, 7, 8],
+        ticktext=["R$ 1 mil", "R$ 10 mil", "R$ 100 mil", "R$ 1 mi", "R$ 10 mi", "R$ 100 mi"],
+    )
+    fig.update_yaxes(title="Qtd. contratos")
+    fig.update_traces(
+        hovertemplate="Faixa log10: %{x:.2f}<br>Qtd. contratos: %{y}<extra></extra>",
+        marker_line_width=0,
+    )
+
+    median_value = positive_values.median()
+    fig.add_vline(
+        x=math.log10(max(float(median_value), 1.0)),
+        line_width=2,
+        line_dash="dash",
+        line_color=COLOR_ACCENT,
+        annotation_text=f"Mediana: {format_currency(median_value)}",
+        annotation_position="top left",
+        annotation_font=dict(color=COLOR_ACCENT, size=11),
     )
     return fig
 
 
-def build_value_boxplot(df: pd.DataFrame) -> go.Figure:
-    fig = px.box(
-        df,
-        y="valor_global",
-        color_discrete_sequence=[COLOR_ACCENT],
-        points="outliers",
-        labels={"valor_global": "Valor global"},
+def build_value_band_chart(df: pd.DataFrame) -> go.Figure:
+    bands_df = build_value_bands(df)
+    if bands_df.empty:
+        return build_empty_chart("Nao ha faixas suficientes para este recorte.")
+
+    bands_df["faixa_label"] = bands_df["faixa_valor"].astype(str)
+    bands_df["valor_label"] = bands_df["valor_total"].apply(format_currency)
+    bands_df["share_label"] = bands_df["participacao"].map(lambda value: f"{value:.1f}% da carteira")
+
+    fig = go.Figure()
+    fig.add_bar(
+        x=bands_df["valor_total"],
+        y=bands_df["faixa_label"],
+        orientation="h",
+        marker=dict(
+            color=[COLOR_PRIMARY, "#2E6C8A", "#5A87A2", COLOR_ACCENT_SOFT, COLOR_ACCENT][: len(bands_df)]
+        ),
+        text=bands_df["share_label"],
+        textposition="outside",
+        cliponaxis=False,
+        customdata=bands_df[["valor_label", "quantidade"]],
+        hovertemplate=(
+            "<b>%{y}</b><br>"
+            "Valor total: %{customdata[0]}<br>"
+            "Qtd. contratos: %{customdata[1]}<extra></extra>"
+        ),
     )
-    fig.update_layout(
-        height=420,
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=0, r=0, t=20, b=0),
-        yaxis_title="Valor global (R$)",
-        xaxis_title="",
-        showlegend=False,
-    )
+    apply_chart_theme(fig, height=410)
+    fig.update_layout(showlegend=False, bargap=0.28)
+    fig.update_xaxes(title="Valor total por faixa", tickprefix="R$ ")
+    fig.update_yaxes(title="", showgrid=False)
     return fig
 
 
@@ -1204,12 +1452,15 @@ def render_sidebar() -> tuple[bool, str, date | None, date | None]:
             """
             - Portal: `pncp.gov.br`
             - Atualizacao: tempo real
+            - Janela robusta: ate 20 mil contratos
             - Exportacao: Excel e CSV
             """
         )
 
         st.markdown("### Notas operacionais")
-        st.caption("A primeira busca pode levar alguns segundos por causa da paginacao e do cache inicial.")
+        st.caption(
+            "Consultas volumosas podem levar alguns segundos. Acima de 20 mil itens no indice, aplique um recorte temporal para auditoria completa."
+        )
 
     return submitted, cnpj_input, start_date, end_date
 
@@ -1243,6 +1494,10 @@ def run_search(cnpj_input: str, start_date: date | None, end_date: date | None) 
         "supplier_name": payload.get("supplier_name") or "Fornecedor consultado",
         "total_records": payload.get("total_records", len(contracts_df)),
         "total_pages": payload.get("total_pages", 1),
+        "retrieved_records": payload.get("retrieved_records", len(contracts_df)),
+        "search_strategy": payload.get("search_strategy", "janela_unica"),
+        "retrieved_windows": payload.get("retrieved_windows", 1),
+        "is_partial": payload.get("is_partial", False),
         "sample_checked": payload.get("sample_checked", 0),
         "sample_exact_match": payload.get("sample_exact_match", True),
         "requested_start_date": start_date,
@@ -1259,16 +1514,29 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
         cnpj=meta.get("cnpj", ""),
         supplier_name=meta.get("supplier_name", "Fornecedor consultado"),
         total_records=meta.get("total_records", len(df)),
+        retrieved_records=meta.get("retrieved_records", len(df)),
         start_date=requested_start,
         end_date=requested_end,
         sample_checked=meta.get("sample_checked", 0),
         sample_exact_match=meta.get("sample_exact_match", True),
+        search_strategy=meta.get("search_strategy", "janela_unica"),
+        is_partial=meta.get("is_partial", False),
     )
 
     if meta.get("sample_checked", 0) > 0 and not meta.get("sample_exact_match", True):
         ui_alert(
             "warning",
             "A amostra verificada nao confirmou todos os contratos no CNPJ informado. Revise manualmente antes de usar a base para decisao.",
+        )
+
+    if meta.get("is_partial", False):
+        ui_alert(
+            "warning",
+            (
+                f"O PNCP indexa {format_integer(meta.get('total_records', len(df)))} contratos para este CNPJ, "
+                f"mas o endpoint publico limita a recuperacao a {format_integer(meta.get('retrieved_records', len(df)))} "
+                "itens nesta estrategia. Para auditoria completa, aplique um recorte temporal menor."
+            ),
         )
 
     if df.empty:
@@ -1356,9 +1624,9 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
             )
         with exec_col_2:
             chart_wrapper(
-                build_status_donut(filtered_df),
+                build_status_chart(filtered_df),
                 "Situacao das contratacoes",
-                "Distribuicao das publicacoes por status do portal.",
+                "Leitura objetiva do volume publicado por status no portal.",
                 icon="📌",
             )
 
@@ -1491,14 +1759,14 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
             chart_wrapper(
                 build_value_histogram(filtered_df),
                 "Histograma de valores",
-                "Distribuicao dos tickets contratuais em faixas continuas.",
+                "Distribuicao dos tickets em escala logaritmica para evitar distorcao por outliers.",
                 icon="📶",
             )
         with dist_col_2:
             chart_wrapper(
-                build_value_boxplot(filtered_df),
-                "Boxplot dos valores",
-                "Amplitude, mediana e outliers da carteira filtrada.",
+                build_value_band_chart(filtered_df),
+                "Valor por faixa",
+                "Concentracao financeira por bandas de ticket contratual.",
                 icon="📉",
             )
 

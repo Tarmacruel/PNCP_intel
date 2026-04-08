@@ -6,6 +6,14 @@ import pandas as pd
 import streamlit as st
 
 
+PLOTLY_CONFIG = {
+    "displayModeBar": False,
+    "displaylogo": False,
+    "responsive": True,
+    "scrollZoom": False,
+}
+
+
 def badge_html(text: str, variant: str = "primary") -> str:
     return f'<span class="ui-badge ui-badge-{variant}">{text}</span>'
 
@@ -53,7 +61,7 @@ def section_header(title: str, subtitle: str | None = None, *, icon: str | None 
 
 def chart_wrapper(fig, title: str, description: str | None = None, *, icon: str | None = None) -> None:
     section_header(title, description, icon=icon)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
 
 
 def alert(kind: str, message: str, *, icon: str | None = None) -> None:
