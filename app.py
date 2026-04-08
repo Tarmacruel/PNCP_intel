@@ -11,6 +11,17 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from advanced_charts import (
+    build_boxplot_top_orgaos,
+    build_bubble_organs,
+    build_funnel_status,
+    build_heatmap_uf_year,
+    build_scatter_value_over_time,
+    build_sunburst_hierarchy,
+    build_treemap_hierarchy,
+)
+from advanced_filters import apply_advanced_filters
+from pdf_generator import pdf_generator
 
 from components import (
     alert as ui_alert,
@@ -563,6 +574,44 @@ def load_css() -> None:
             background: rgba(255,255,255,.95) !important;
             color: var(--text-primary) !important;
             min-height: 46px;
+        }
+
+        [data-testid="stWidgetLabel"] p,
+        [data-testid="stWidgetLabel"] label,
+        .stMultiSelect label,
+        .stSelectbox label {
+            color: var(--text-primary) !important;
+            font-weight: 700 !important;
+            opacity: 1 !important;
+        }
+
+        [data-baseweb="select"] > div {
+            box-shadow: 0 1px 2px rgba(17, 40, 59, 0.04);
+        }
+
+        [data-baseweb="select"] span,
+        [data-baseweb="select"] input,
+        [data-baseweb="tag"] span {
+            color: var(--text-primary) !important;
+            opacity: 1 !important;
+        }
+
+        [data-baseweb="select"] [aria-hidden="true"] {
+            color: var(--text-secondary) !important;
+            opacity: 1 !important;
+        }
+
+        [data-baseweb="tag"] {
+            background: rgba(20, 82, 110, 0.08) !important;
+            border-radius: 999px !important;
+            border: 1px solid rgba(20, 82, 110, 0.12) !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
+        [data-testid="stSidebar"] [data-testid="stWidgetLabel"] label,
+        [data-testid="stSidebar"] .stMultiSelect label,
+        [data-testid="stSidebar"] .stSelectbox label {
+            color: #f8fbff !important;
         }
 
         .stTextInput input:focus,
@@ -1391,6 +1440,48 @@ def build_value_bands(df: pd.DataFrame) -> pd.DataFrame:
     return summary
 
 
+def prepare_export_payload(
+    df: pd.DataFrame,
+    meta: dict[str, Any],
+    *,
+    export_format: str,
+    include_charts: bool,
+    filter_summary: str,
+) -> tuple[bytes, str, str, str]:
+    file_stem = f"pncp_contratos_{meta.get('cnpj', '')}"
+
+    if export_format == "CSV":
+        payload = dataframe_to_csv_bytes(df)
+        return payload, f"{file_stem}.csv", "text/csv", "Download CSV"
+
+    if export_format == "Excel":
+        payload = build_excel_report_bytes(df, meta, filter_summary)
+        return (
+            payload,
+            f"{file_stem}.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "Download Excel",
+        )
+
+    chart_payload = None
+    if include_charts:
+        chart_payload = {
+            "top_orgs": build_top_orgs_chart(df),
+            "timeline": build_timeline_chart(df),
+            "value_band": build_value_band_chart(df),
+        }
+
+    report_mode = "full" if export_format == "PDF Completo" else "executive"
+    payload = pdf_generator.generate_pdf(
+        df,
+        meta=meta,
+        filter_summary=filter_summary,
+        charts=chart_payload,
+        report_mode=report_mode,
+    )
+    return payload, f"{file_stem}.pdf", "application/pdf", "Download PDF"
+
+
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
 def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
@@ -1404,10 +1495,51 @@ def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 
+def build_excel_report_bytes(df: pd.DataFrame, meta: dict[str, Any], filter_summary: str) -> bytes:
+    export_df = df.copy()
+    for column_name in ["data_assinatura", "data_publicacao_pncp", "data_atualizacao_pncp", "data_referencia", "mes_ano"]:
+        if column_name in export_df.columns:
+            export_df[column_name] = pd.to_datetime(export_df[column_name], errors="coerce").dt.strftime("%Y-%m-%d")
+
+    summary_rows = [
+        ["Fornecedor", meta.get("supplier_name", "Fornecedor consultado")],
+        ["CNPJ", meta.get("cnpj", "-")],
+        ["Contratos indexados", meta.get("total_records", len(df))],
+        ["Contratos recuperados", meta.get("retrieved_records", len(df))],
+        ["Valor total", format_currency(df["valor_global"].sum())],
+        ["Valor medio", format_currency(df["valor_global"].mean())],
+        ["Orgaos distintos", format_integer(df["orgao_nome"].nunique())],
+        ["Filtros ativos", filter_summary],
+        ["Atualizado em", meta.get("fetched_at", "-")],
+    ]
+    summary_df = pd.DataFrame(summary_rows, columns=["Metrica", "Valor"])
+
+    top_orgaos_df = (
+        df.groupby("orgao_nome", dropna=False)
+        .agg(quantidade=("numero_controle_pncp", "count"), valor_total=("valor_global", "sum"))
+        .reset_index()
+        .sort_values("valor_total", ascending=False)
+        .head(20)
+    )
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        summary_df.to_excel(writer, index=False, sheet_name="Resumo")
+        top_orgaos_df.to_excel(writer, index=False, sheet_name="Top_orgaos")
+        export_df.to_excel(writer, index=False, sheet_name="Contratos")
+
+    return output.getvalue()
+
+
 def render_sidebar() -> tuple[bool, str, date | None, date | None]:
     with st.sidebar:
         st.markdown("## Consulta do fornecedor")
         st.caption("Informe o CNPJ e, se quiser, aplique um recorte temporal para leitura operacional.")
+
+        st.session_state.setdefault("search_cnpj", "")
+        st.session_state.setdefault("search_use_period", False)
+        st.session_state.setdefault("search_start_date", date(date.today().year - 1, 1, 1))
+        st.session_state.setdefault("search_end_date", date.today())
 
         with st.form("search_form", clear_on_submit=False):
             st.markdown("**CNPJ do fornecedor**")
@@ -1416,36 +1548,35 @@ def render_sidebar() -> tuple[bool, str, date | None, date | None]:
                 placeholder="00.000.000/0000-00",
                 help="Aceita entrada com ou sem pontuacao.",
                 label_visibility="collapsed",
+                key="search_cnpj",
             )
 
             use_period_filter = st.toggle(
                 "Aplicar recorte por data de assinatura",
-                value=False,
                 help="Desligado: considera todo o historico indexado na busca do portal.",
+                key="search_use_period",
             )
 
             start_date: date | None = None
             end_date: date | None = None
 
             if use_period_filter:
-                today = date.today()
-                default_start = date(today.year - 1, 1, 1)
                 period_col_1, period_col_2 = st.columns(2)
                 with period_col_1:
                     st.caption("Inicial")
                     start_date = st.date_input(
                         "Inicial",
-                        value=default_start,
                         format="DD/MM/YYYY",
                         label_visibility="collapsed",
+                        key="search_start_date",
                     )
                 with period_col_2:
                     st.caption("Final")
                     end_date = st.date_input(
                         "Final",
-                        value=today,
                         format="DD/MM/YYYY",
                         label_visibility="collapsed",
+                        key="search_end_date",
                     )
 
             submitted = st.form_submit_button("Buscar contratos", use_container_width=True)
@@ -1553,27 +1684,46 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
         )
         return
 
-    orgao_options = sorted(df["orgao_nome"].dropna().unique().tolist())
-    year_options = sorted([int(year) for year in df["ano"].dropna().unique().tolist()], reverse=True)
-    situation_options = sorted(df["situacao_nome"].dropna().unique().tolist())
+    advanced_filter_state = apply_advanced_filters(df)
+    analysis_df = advanced_filter_state.filtered_df
+    advanced_summary = advanced_filter_state.summary_text()
+
+    if advanced_filter_state.active_filters:
+        ui_alert("info", f"Filtros avancados ativos: {advanced_summary}")
+
+    if analysis_df.empty:
+        ui_empty_state(
+            icon="🧭",
+            title="Sem resultados apos os filtros avancados",
+            message="Os filtros laterais removeram todos os contratos da analise. Ajuste texto, faixa de valor ou presets para continuar.",
+            badges=["Limpe filtros", "Amplie a faixa de valor", "Revise UFs e modalidades"],
+        )
+        return
+
+    orgao_options = sorted(analysis_df["orgao_nome"].dropna().unique().tolist())
+    year_options = sorted([int(year) for year in analysis_df["ano"].dropna().unique().tolist()], reverse=True)
+    situation_options = sorted(analysis_df["situacao_nome"].dropna().unique().tolist())
 
     section_header(
         "Filtros dinamicos da analise",
         "Todos os graficos, metricas, exportacoes e a tabela respondem aos recortes abaixo.",
         icon="🎛️",
     )
-    st.markdown("<div class='filter-card'>", unsafe_allow_html=True)
     filter_col_1, filter_col_2, filter_col_3 = st.columns(3)
     with filter_col_1:
-        selected_orgaos = st.multiselect("Orgao", options=orgao_options, default=[])
+        selected_orgaos = st.multiselect("Orgao", options=orgao_options, default=[], key="main_filter_orgaos")
     with filter_col_2:
-        selected_years = st.multiselect("Ano", options=year_options, default=[])
+        selected_years = st.multiselect("Ano", options=year_options, default=[], key="main_filter_anos")
     with filter_col_3:
-        selected_situations = st.multiselect("Situacao", options=situation_options, default=[])
-    st.markdown("</div>", unsafe_allow_html=True)
+        selected_situations = st.multiselect(
+            "Situacao",
+            options=situation_options,
+            default=[],
+            key="main_filter_situacoes",
+        )
 
     filtered_df = apply_dashboard_filters(
-        df,
+        analysis_df,
         start_date=requested_start,
         end_date=requested_end,
         orgaos=selected_orgaos,
@@ -1608,12 +1758,13 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
     with metric_col_5:
         ui_metric_card("Anos cobertos", format_integer(years_covered), icon="🗓️", delta="Historico visivel")
 
-    tab_1, tab_2, tab_3, tab_4, tab_5 = st.tabs(
+    tab_1, tab_2, tab_3, tab_4, tab_5, tab_6 = st.tabs(
         [
             "Visao executiva",
             "Orgaos e temporalidade",
             "Base completa",
             "Distribuicao de valor",
+            "Graficos avancados",
             "Exportacao",
         ]
     )
@@ -1799,38 +1950,136 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
         )
 
     with tab_5:
+        advanced_col_1, advanced_col_2 = st.columns(2)
+        with advanced_col_1:
+            chart_wrapper(
+                build_heatmap_uf_year(filtered_df),
+                "Heatmap de UF por ano",
+                "Mapa de calor do valor contratado por unidade federativa e ano de referencia.",
+                icon="🗺️",
+            )
+        with advanced_col_2:
+            chart_wrapper(
+                build_funnel_status(filtered_df),
+                "Funil de situacoes",
+                "Leitura de afunilamento por status publicado no portal.",
+                icon="🎯",
+            )
+
+        chart_wrapper(
+            build_treemap_hierarchy(filtered_df),
+            "Treemap hierarquico",
+            "Distribuicao da carteira por esfera, UF e orgao contratante.",
+            icon="📦",
+        )
+
+        advanced_col_3, advanced_col_4 = st.columns(2)
+        with advanced_col_3:
+            chart_wrapper(
+                build_scatter_value_over_time(filtered_df),
+                "Dispersao temporal de valores",
+                "Amostra visual da carteira ao longo do tempo com escala logaritmica.",
+                icon="✨",
+            )
+        with advanced_col_4:
+            chart_wrapper(
+                build_boxplot_top_orgaos(filtered_df),
+                "Boxplot dos principais orgaos",
+                "Amplitude dos tickets por orgao entre os maiores compradores.",
+                icon="📈",
+            )
+
+        advanced_col_5, advanced_col_6 = st.columns(2)
+        with advanced_col_5:
+            chart_wrapper(
+                build_bubble_organs(filtered_df),
+                "Bolhas de densidade por orgao",
+                "Cruza quantidade de contratos, valor total e ticket medio.",
+                icon="🔵",
+            )
+        with advanced_col_6:
+            chart_wrapper(
+                build_sunburst_hierarchy(filtered_df),
+                "Sunburst da carteira",
+                "Hierarquia da base por esfera, UF e tipo contratual.",
+                icon="☀️",
+            )
+
+    with tab_6:
         section_header(
             "Exportar base filtrada",
-            "Leve a base tratada para analise externa ou consolidacao interna.",
+            "Gere PDF executivo ou completo, alem dos pacotes Excel e CSV da base filtrada.",
             icon="⬇️",
         )
-        export_df = filtered_df.copy()
-        export_df["data_assinatura"] = export_df["data_assinatura"].dt.strftime("%Y-%m-%d")
-        export_df["data_publicacao_pncp"] = export_df["data_publicacao_pncp"].dt.strftime("%Y-%m-%d")
-        export_df["data_atualizacao_pncp"] = export_df["data_atualizacao_pncp"].dt.strftime("%Y-%m-%d")
-        export_df["data_referencia"] = export_df["data_referencia"].dt.strftime("%Y-%m-%d")
-        export_df["mes_ano"] = export_df["mes_ano"].dt.strftime("%Y-%m-%d")
+        export_summary = advanced_summary if advanced_filter_state.active_filters else "Sem filtros avancados ativos."
+        export_meta = {
+            **meta,
+            "fetched_at": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        }
 
-        export_col_1, export_col_2 = st.columns(2)
-        file_stem = f"pncp_contratos_{meta.get('cnpj', '')}"
+        export_col_1, export_col_2 = st.columns([1.2, 1])
         with export_col_1:
+            export_format = st.selectbox(
+                "Formato do relatorio",
+                ["PDF Executivo", "PDF Completo", "Excel", "CSV"],
+                key="export_format",
+            )
+        with export_col_2:
+            include_charts = st.checkbox(
+                "Incluir graficos no PDF",
+                value=True,
+                key="export_include_charts",
+                help="Quando desmarcado, o PDF fica mais leve e rapido para gerar.",
+            )
+
+        if st.button("Preparar pacote de exportacao", use_container_width=True, key="prepare_export_button"):
+            with st.spinner("Gerando arquivo..."):
+                try:
+                    payload, filename, mime_type, label = prepare_export_payload(
+                        filtered_df,
+                        export_meta,
+                        export_format=export_format,
+                        include_charts=include_charts,
+                        filter_summary=export_summary,
+                    )
+                except Exception as exc:
+                    ui_alert("error", f"Nao foi possivel gerar o arquivo agora: {exc}")
+                else:
+                    st.session_state["prepared_export"] = {
+                        "payload": payload,
+                        "filename": filename,
+                        "mime_type": mime_type,
+                        "label": label,
+                    }
+                    ui_alert("success", f"Arquivo preparado com sucesso: {filename}")
+
+        prepared_export = st.session_state.get("prepared_export")
+        if prepared_export:
             st.download_button(
-                "Baixar Excel",
-                data=dataframe_to_excel_bytes(export_df),
-                file_name=f"{file_stem}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                prepared_export["label"],
+                data=prepared_export["payload"],
+                file_name=prepared_export["filename"],
+                mime=prepared_export["mime_type"],
                 use_container_width=True,
             )
-            st.caption("Planilha com a base filtrada, pronta para analise complementar.")
-        with export_col_2:
+
+        quick_export_col_1, quick_export_col_2 = st.columns(2)
+        with quick_export_col_1:
             st.download_button(
-                "Baixar CSV",
-                data=dataframe_to_csv_bytes(export_df),
-                file_name=f"{file_stem}.csv",
+                "Baixar CSV rapido",
+                data=dataframe_to_csv_bytes(filtered_df),
+                file_name=f"pncp_contratos_{meta.get('cnpj', '')}.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
-            st.caption("Arquivo UTF-8 com separador ponto e virgula.")
+        with quick_export_col_2:
+            st.download_button(
+                "Baixar Excel rapido",
+                data=build_excel_report_bytes(filtered_df, export_meta, export_summary),
+                file_name=f"pncp_contratos_{meta.get('cnpj', '')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
 
         section_header("Links uteis", "Atalhos para conferencia no portal e documentacao publica.", icon="🔗")
         st.markdown(
