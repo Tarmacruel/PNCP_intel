@@ -124,17 +124,17 @@ class PDFReportGenerator:
         story: list[Any] = []
         story.extend(self._build_cover(df, meta))
         story.extend(self._build_summary(df, meta, filter_summary))
-        story.extend(self._build_metric_cards(df))
+        story.extend(self._build_metric_cards(df, meta))
 
         if charts:
             story.extend(self._build_chart_sections(charts))
 
-        story.extend(self._build_top_organs_table(df))
+        story.extend(self._build_primary_ranking_table(df, meta))
         story.extend(self._build_yearly_table(df))
         story.extend(self._build_value_bands_table(df))
 
         if report_mode == "full":
-            story.extend(self._build_contract_table(df))
+            story.extend(self._build_contract_table(df, meta))
 
         doc.build(
             story,
@@ -145,24 +145,35 @@ class PDFReportGenerator:
         return buffer.read()
 
     def _build_cover(self, df: pd.DataFrame, meta: dict[str, Any]) -> list[Any]:
-        supplier_name = _safe_text(meta.get("supplier_name", "Fornecedor consultado"))
-        start_date = meta.get("requested_start_date")
-        end_date = meta.get("requested_end_date")
-        if start_date and end_date:
-            period_label = f"{start_date.strftime('%d/%m/%Y')} a {end_date.strftime('%d/%m/%Y')}"
-        elif start_date:
-            period_label = f"A partir de {start_date.strftime('%d/%m/%Y')}"
-        elif end_date:
-            period_label = f"Ate {end_date.strftime('%d/%m/%Y')}"
+        query_scope = meta.get("query_scope", "supplier")
+        entity_name = _safe_text(
+            meta.get("organ_name", "Orgao publico consultado")
+            if query_scope == "organ"
+            else meta.get("supplier_name", "Fornecedor consultado")
+        )
+
+        if query_scope == "organ":
+            period_label = f"Faixa anual: {meta.get('start_year', '-')} a {meta.get('end_year', '-')}"
+            subtitle = "Panorama executivo de orgao publico"
         else:
-            period_label = "Todo o historico indexado"
+            start_date = meta.get("requested_start_date")
+            end_date = meta.get("requested_end_date")
+            if start_date and end_date:
+                period_label = f"{start_date.strftime('%d/%m/%Y')} a {end_date.strftime('%d/%m/%Y')}"
+            elif start_date:
+                period_label = f"A partir de {start_date.strftime('%d/%m/%Y')}"
+            elif end_date:
+                period_label = f"Ate {end_date.strftime('%d/%m/%Y')}"
+            else:
+                period_label = "Todo o historico indexado"
+            subtitle = "Dossie executivo de contratos publicos"
 
         cover_box = Table(
             [
                 [Paragraph("PNCP Intelligence", self.styles["title"])],
-                [Paragraph("Dossie executivo de contratos publicos", self.styles["subtitle"])],
+                [Paragraph(subtitle, self.styles["subtitle"])],
                 [Spacer(1, 0.35 * cm)],
-                [Paragraph(supplier_name, self.styles["cover_label"])],
+                [Paragraph(entity_name, self.styles["cover_label"])],
                 [Paragraph(_safe_text(meta.get("cnpj", "-")), self.styles["cover_label"])],
                 [Paragraph(period_label, self.styles["subtitle"])],
                 [Paragraph(_safe_text(meta.get("fetched_at", "-")), self.styles["subtitle"])],
@@ -186,27 +197,48 @@ class PDFReportGenerator:
         return [Spacer(1, 5.5 * cm), cover_box, PageBreak()]
 
     def _build_summary(self, df: pd.DataFrame, meta: dict[str, Any], filter_summary: str) -> list[Any]:
+        query_scope = meta.get("query_scope", "supplier")
         total_records = meta.get("total_records", len(df))
         retrieved_records = meta.get("retrieved_records", len(df))
         strategy = meta.get("search_strategy", "janela_unica")
         strategy_label = "Cobertura bidirecional do indice" if strategy == "janela_dupla" else "Janela unica do indice"
-        partial_note = ""
-        if meta.get("is_partial", False):
-            partial_note = (
-                f"A recuperacao da base foi parcial: {retrieved_records} de {total_records} contratos retornaram "
-                "na janela publica disponivel."
-            )
 
-        summary_text = (
-            f"<b>Fornecedor:</b> {_safe_text(meta.get('supplier_name'))}<br/>"
-            f"<b>CNPJ:</b> {_safe_text(meta.get('cnpj'))}<br/>"
-            f"<b>Contratos indexados:</b> {_format_integer(total_records)}<br/>"
-            f"<b>Contratos recuperados:</b> {_format_integer(retrieved_records)}<br/>"
-            f"<b>Estrategia:</b> {strategy_label}<br/>"
-            f"<b>Filtros aplicados:</b> {_safe_text(filter_summary)}"
-        )
-        if partial_note:
-            summary_text += f"<br/><b>Observacao:</b> {partial_note}"
+        if query_scope == "organ":
+            exact_records = meta.get("exact_records", len(df))
+            summary_text = (
+                f"<b>Orgao:</b> {_safe_text(meta.get('organ_name'))}<br/>"
+                f"<b>CNPJ do orgao:</b> {_safe_text(meta.get('cnpj'))}<br/>"
+                f"<b>Faixa anual:</b> {meta.get('start_year', '-')} a {meta.get('end_year', '-')}<br/>"
+                f"<b>Registros brutos no indice:</b> {_format_integer(total_records)}<br/>"
+                f"<b>Registros recuperados:</b> {_format_integer(retrieved_records)}<br/>"
+                f"<b>Base exata no recorte:</b> {_format_integer(exact_records)}<br/>"
+                f"<b>Estrategia:</b> {strategy_label}<br/>"
+                f"<b>Enriquecimento:</b> {_safe_text(meta.get('enrichment_status', 'Consulta consolidada'))}<br/>"
+                f"<b>Filtros aplicados:</b> {_safe_text(filter_summary)}"
+            )
+            if meta.get("is_partial", False):
+                summary_text += (
+                    "<br/><b>Observacao:</b> A busca por orgao excedeu a janela robusta do indice; "
+                    "considere reduzir a faixa anual para auditoria total."
+                )
+        else:
+            partial_note = ""
+            if meta.get("is_partial", False):
+                partial_note = (
+                    f"A recuperacao da base foi parcial: {retrieved_records} de {total_records} contratos retornaram "
+                    "na janela publica disponivel."
+                )
+
+            summary_text = (
+                f"<b>Fornecedor:</b> {_safe_text(meta.get('supplier_name'))}<br/>"
+                f"<b>CNPJ:</b> {_safe_text(meta.get('cnpj'))}<br/>"
+                f"<b>Contratos indexados:</b> {_format_integer(total_records)}<br/>"
+                f"<b>Contratos recuperados:</b> {_format_integer(retrieved_records)}<br/>"
+                f"<b>Estrategia:</b> {strategy_label}<br/>"
+                f"<b>Filtros aplicados:</b> {_safe_text(filter_summary)}"
+            )
+            if partial_note:
+                summary_text += f"<br/><b>Observacao:</b> {partial_note}"
 
         return [
             Paragraph("Resumo executivo", self.styles["section"]),
@@ -214,18 +246,30 @@ class PDFReportGenerator:
             Spacer(1, 0.35 * cm),
         ]
 
-    def _build_metric_cards(self, df: pd.DataFrame) -> list[Any]:
+    def _build_metric_cards(self, df: pd.DataFrame, meta: dict[str, Any]) -> list[Any]:
+        query_scope = meta.get("query_scope", "supplier")
         total_contracts = len(df)
         total_value = float(df["valor_global"].sum())
         average_value = float(df["valor_global"].mean()) if total_contracts else 0.0
-        total_organs = int(df["orgao_nome"].nunique())
-
-        metrics = [
-            ("Contratos", _format_integer(total_contracts)),
-            ("Valor total", _format_currency(total_value)),
-            ("Valor medio", _format_currency(average_value)),
-            ("Orgaos", _format_integer(total_organs)),
-        ]
+        if query_scope == "organ":
+            total_suppliers = int(
+                df["fornecedor_nome"].replace(["Nao informado", "Nao se aplica"], pd.NA).dropna().nunique()
+            )
+            total_units = int(df["unidade_nome"].nunique())
+            metrics = [
+                ("Registros", _format_integer(total_contracts)),
+                ("Valor total", _format_currency(total_value)),
+                ("Fornecedores", _format_integer(total_suppliers)),
+                ("Unidades", _format_integer(total_units)),
+            ]
+        else:
+            total_organs = int(df["orgao_nome"].nunique())
+            metrics = [
+                ("Contratos", _format_integer(total_contracts)),
+                ("Valor total", _format_currency(total_value)),
+                ("Valor medio", _format_currency(average_value)),
+                ("Orgaos", _format_integer(total_organs)),
+            ]
 
         metric_cells = []
         for label, value in metrics:
@@ -288,23 +332,45 @@ class PDFReportGenerator:
 
         return story
 
-    def _build_top_organs_table(self, df: pd.DataFrame) -> list[Any]:
-        grouped = (
-            df.groupby("orgao_nome", dropna=False)
-            .agg(quantidade=("numero_controle_pncp", "count"), valor_total=("valor_global", "sum"))
-            .reset_index()
-            .sort_values("valor_total", ascending=False)
-            .head(12)
-        )
+    def _build_primary_ranking_table(self, df: pd.DataFrame, meta: dict[str, Any]) -> list[Any]:
+        query_scope = meta.get("query_scope", "supplier")
+        if query_scope == "organ":
+            grouped = (
+                df[df["document_type"].eq("contrato")]
+                .groupby("fornecedor_nome", dropna=False)
+                .agg(quantidade=("numero_controle_pncp", "count"), valor_total=("valor_global", "sum"))
+                .reset_index()
+                .sort_values("valor_total", ascending=False)
+                .head(12)
+            )
+            if grouped.empty:
+                return []
+            title = "Principais fornecedores"
+            first_column = "Fornecedor"
+            name_column = "fornecedor_nome"
+        else:
+            grouped = (
+                df.groupby("orgao_nome", dropna=False)
+                .agg(quantidade=("numero_controle_pncp", "count"), valor_total=("valor_global", "sum"))
+                .reset_index()
+                .sort_values("valor_total", ascending=False)
+                .head(12)
+            )
+            if grouped.empty:
+                return []
+            title = "Principais orgaos contratantes"
+            first_column = "Orgao"
+            name_column = "orgao_nome"
+
         if grouped.empty:
             return []
 
         total_value = float(df["valor_global"].sum()) or 1.0
-        rows = [["Orgao", "Qtd.", "Valor total", "% carteira"]]
+        rows = [[first_column, "Qtd.", "Valor total", "% carteira"]]
         for _, row in grouped.iterrows():
             rows.append(
                 [
-                    _safe_text(row["orgao_nome"], "Nao informado")[:54],
+                    _safe_text(row[name_column], "Nao informado")[:54],
                     _format_integer(row["quantidade"]),
                     _format_currency(row["valor_total"]),
                     f"{row['valor_total'] / total_value * 100:.1f}%",
@@ -312,7 +378,7 @@ class PDFReportGenerator:
             )
 
         return [
-            Paragraph("Principais orgaos contratantes", self.styles["section"]),
+            Paragraph(title, self.styles["section"]),
             self._build_table(rows, [8.7 * cm, 2 * cm, 3.3 * cm, 2.2 * cm]),
             Spacer(1, 0.4 * cm),
         ]
@@ -391,7 +457,8 @@ class PDFReportGenerator:
             Spacer(1, 0.4 * cm),
         ]
 
-    def _build_contract_table(self, df: pd.DataFrame) -> list[Any]:
+    def _build_contract_table(self, df: pd.DataFrame, meta: dict[str, Any]) -> list[Any]:
+        query_scope = meta.get("query_scope", "supplier")
         sample_df = (
             df.sort_values("data_referencia", ascending=False)
             .head(40)
@@ -400,28 +467,48 @@ class PDFReportGenerator:
         if sample_df.empty:
             return []
 
-        rows = [["Numero PNCP", "Orgao", "Valor", "Data", "Situacao"]]
-        for _, row in sample_df.iterrows():
-            date_label = row["data_assinatura"].strftime("%d/%m/%Y") if pd.notna(row["data_assinatura"]) else "N/A"
-            rows.append(
-                [
-                    _safe_text(row["numero_controle_pncp"])[:22],
-                    _safe_text(row["orgao_nome"])[:40],
-                    _format_currency(row["valor_global"]),
-                    date_label,
-                    _safe_text(row["situacao_nome"])[:18],
-                ]
+        if query_scope == "organ":
+            rows = [["Tipo", "Numero PNCP", "Fornecedor", "Unidade", "Ano"]]
+            for _, row in sample_df.iterrows():
+                rows.append(
+                    [
+                        _safe_text(row.get("document_type_label"))[:18],
+                        _safe_text(row["numero_controle_pncp"])[:22],
+                        _safe_text(row.get("fornecedor_nome"))[:34],
+                        _safe_text(row.get("unidade_nome"))[:32],
+                        _format_integer(row.get("ano")),
+                    ]
+                )
+            title = "Amostra detalhada de documentos"
+            description = (
+                "O relatorio completo inclui uma amostra operacional dos 40 documentos mais recentes apos os filtros ativos."
             )
+            widths = [3.0 * cm, 4.1 * cm, 4.7 * cm, 4.3 * cm, 1.6 * cm]
+        else:
+            rows = [["Numero PNCP", "Orgao", "Valor", "Data", "Situacao"]]
+            for _, row in sample_df.iterrows():
+                date_label = row["data_assinatura"].strftime("%d/%m/%Y") if pd.notna(row["data_assinatura"]) else "N/A"
+                rows.append(
+                    [
+                        _safe_text(row["numero_controle_pncp"])[:22],
+                        _safe_text(row["orgao_nome"])[:40],
+                        _format_currency(row["valor_global"]),
+                        date_label,
+                        _safe_text(row["situacao_nome"])[:18],
+                    ]
+                )
+            title = "Amostra detalhada de contratos"
+            description = (
+                "O relatorio completo inclui uma amostra operacional dos 40 contratos mais recentes apos os filtros ativos."
+            )
+            widths = [4.1 * cm, 6.7 * cm, 3.0 * cm, 2.0 * cm, 2.0 * cm]
 
         return [
             PageBreak(),
-            Paragraph("Amostra detalhada de contratos", self.styles["section"]),
-            Paragraph(
-                "O relatorio completo inclui uma amostra operacional dos 40 contratos mais recentes apos os filtros ativos.",
-                self.styles["body"],
-            ),
+            Paragraph(title, self.styles["section"]),
+            Paragraph(description, self.styles["body"]),
             Spacer(1, 0.2 * cm),
-            self._build_table(rows, [4.1 * cm, 6.7 * cm, 3.0 * cm, 2.0 * cm, 2.0 * cm], font_size=7.4),
+            self._build_table(rows, widths, font_size=7.4),
         ]
 
     def _build_table(self, rows: list[list[str]], column_widths: list[float], *, font_size: float = 8.8) -> Table:

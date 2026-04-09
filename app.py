@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import time
 from datetime import date, datetime
 from io import BytesIO
@@ -46,15 +47,18 @@ st.set_page_config(
 APP_TITLE = "PNCP Intelligence"
 SEARCH_API_URL = "https://pncp.gov.br/api/search/"
 DETAIL_API_BASE = "https://pncp.gov.br/api/pncp/v1/orgaos"
+CONSULTA_CONTRATOS_API_URL = "https://pncp.gov.br/api/consulta/v1/contratos"
 APP_BASE_URL = "https://pncp.gov.br/app"
 REPO_URL = "https://github.com/Tarmacruel/PNCP_intel"
 CACHE_TTL_SECONDS = 3600
 SEARCH_WINDOW_LIMIT = 10000
 DEFAULT_PAGE_SIZE = SEARCH_WINDOW_LIMIT
+CONSULTA_PAGE_SIZE = 500
 MAX_RETRIES = 4
 DEFAULT_SORT = "-data"
 ASCENDING_SORT = "data"
 HTTP_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
+YEAR_RANGE_LIMIT = 5
 COLOR_PRIMARY = "#14526E"
 COLOR_PRIMARY_SOFT = "#72A8C4"
 COLOR_ACCENT = "#C68432"
@@ -65,6 +69,7 @@ COLOR_SUBTEXT = "#5D7185"
 COLOR_GRID = "rgba(22, 51, 72, 0.10)"
 COLOR_AXIS = "rgba(22, 51, 72, 0.18)"
 COLOR_SURFACE = "#FFFFFF"
+EXCEL_ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x08\x0B-\x0C\x0E-\x1F]")
 
 
 class PncpApiError(RuntimeError):
@@ -815,10 +820,10 @@ def fetch_contract_detail(item_url: str) -> dict[str, Any]:
         return request_json(client, url)
 
 
-def build_search_params(cnpj: str, *, sort: str) -> dict[str, Any]:
+def build_search_params(query: str, *, sort: str, document_types: str) -> dict[str, Any]:
     return {
-        "q": cnpj,
-        "tipos_documento": "contrato",
+        "q": query,
+        "tipos_documento": document_types,
         "ordenacao": sort,
         "pagina": 1,
         "tam_pagina": DEFAULT_PAGE_SIZE,
@@ -826,7 +831,7 @@ def build_search_params(cnpj: str, *, sort: str) -> dict[str, Any]:
 
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
-def fetch_contract_search(cnpj: str) -> dict[str, Any]:
+def fetch_search_index(query: str, *, document_types: str) -> dict[str, Any]:
     all_items: list[dict[str, Any]] = []
 
     with httpx.Client(
@@ -837,7 +842,7 @@ def fetch_contract_search(cnpj: str) -> dict[str, Any]:
         recent_payload = request_json(
             client,
             SEARCH_API_URL,
-            params=build_search_params(cnpj, sort=DEFAULT_SORT),
+            params=build_search_params(query, sort=DEFAULT_SORT, document_types=document_types),
         )
         recent_items = recent_payload.get("items", []) or []
         total_records = int(recent_payload.get("total") or len(recent_items))
@@ -854,7 +859,7 @@ def fetch_contract_search(cnpj: str) -> dict[str, Any]:
             oldest_payload = request_json(
                 client,
                 SEARCH_API_URL,
-                params=build_search_params(cnpj, sort=ASCENDING_SORT),
+                params=build_search_params(query, sort=ASCENDING_SORT, document_types=document_types),
             )
             all_items.extend(oldest_payload.get("items", []) or [])
             search_strategy = "janela_dupla"
@@ -869,6 +874,25 @@ def fetch_contract_search(cnpj: str) -> dict[str, Any]:
         seen_ids.add(unique_key)
         deduplicated_items.append(item)
 
+    retrieved_records = len(deduplicated_items)
+    is_partial = total_records > (SEARCH_WINDOW_LIMIT * retrieved_windows) and retrieved_records < total_records
+
+    return {
+        "items": deduplicated_items,
+        "total_records": total_records,
+        "total_pages": total_pages,
+        "retrieved_records": retrieved_records,
+        "search_strategy": search_strategy,
+        "retrieved_windows": retrieved_windows,
+        "is_partial": is_partial,
+    }
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def fetch_contract_search(cnpj: str) -> dict[str, Any]:
+    search_payload = fetch_search_index(cnpj, document_types="contrato")
+    deduplicated_items = search_payload.get("items", []) or []
+
     supplier_name = None
     sample_checked = 0
     sample_exact_match = True
@@ -882,21 +906,71 @@ def fetch_contract_search(cnpj: str) -> dict[str, Any]:
         if detail.get("niFornecedor") != cnpj:
             sample_exact_match = False
 
-    retrieved_records = len(deduplicated_items)
-    is_partial = total_records > (SEARCH_WINDOW_LIMIT * retrieved_windows) and retrieved_records < total_records
-
     return {
         "items": deduplicated_items,
-        "total_records": total_records,
-        "total_pages": total_pages,
-        "retrieved_records": retrieved_records,
-        "search_strategy": search_strategy,
-        "retrieved_windows": retrieved_windows,
-        "is_partial": is_partial,
+        "total_records": search_payload.get("total_records", len(deduplicated_items)),
+        "total_pages": search_payload.get("total_pages", 1),
+        "retrieved_records": search_payload.get("retrieved_records", len(deduplicated_items)),
+        "search_strategy": search_payload.get("search_strategy", "janela_unica"),
+        "retrieved_windows": search_payload.get("retrieved_windows", 1),
+        "is_partial": search_payload.get("is_partial", False),
         "supplier_name": supplier_name,
         "sample_checked": sample_checked,
         "sample_exact_match": sample_exact_match,
     }
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def fetch_organ_contract_enrichment(cnpj: str, start_year: int, end_year: int) -> pd.DataFrame:
+    all_records: list[dict[str, Any]] = []
+
+    with httpx.Client(
+        timeout=HTTP_TIMEOUT,
+        follow_redirects=True,
+        headers={"User-Agent": f"{APP_TITLE}/1.0"},
+    ) as client:
+        for year in range(start_year, end_year + 1):
+            params = {
+                "dataInicial": f"{year}0101",
+                "dataFinal": f"{year}1231",
+                "cnpjOrgao": cnpj,
+                "pagina": 1,
+                "tamanhoPagina": CONSULTA_PAGE_SIZE,
+            }
+
+            while True:
+                payload = request_json(client, CONSULTA_CONTRATOS_API_URL, params=params)
+                records = payload.get("data", []) or []
+                all_records.extend(records)
+
+                total_pages = int(payload.get("totalPaginas") or 1)
+                current_page = int(payload.get("numeroPagina") or params["pagina"])
+                if current_page >= total_pages or not records:
+                    break
+
+                params["pagina"] += 1
+
+    if not all_records:
+        return pd.DataFrame()
+
+    enrichment_df = pd.DataFrame(all_records).copy()
+    enrichment_df["numero_controle_pncp"] = enrichment_df.get("numeroControlePNCP", "").fillna("")
+    enrichment_df["fornecedor_cnpj"] = enrichment_df.get("niFornecedor", "").fillna("")
+    enrichment_df["fornecedor_nome"] = enrichment_df.get("nomeRazaoSocialFornecedor", "").fillna("")
+    enrichment_df["valor_global_api"] = pd.to_numeric(enrichment_df.get("valorGlobal"), errors="coerce")
+    enrichment_df["data_assinatura_api"] = pd.to_datetime(enrichment_df.get("dataAssinatura"), errors="coerce")
+    enrichment_df["ano_api"] = pd.to_numeric(enrichment_df.get("anoContrato"), errors="coerce").astype("Int64")
+
+    return enrichment_df[
+        [
+            "numero_controle_pncp",
+            "fornecedor_cnpj",
+            "fornecedor_nome",
+            "valor_global_api",
+            "data_assinatura_api",
+            "ano_api",
+        ]
+    ].drop_duplicates(subset=["numero_controle_pncp"], keep="last")
 
 
 def normalize_contracts(payload: dict[str, Any], cnpj: str) -> pd.DataFrame:
@@ -976,6 +1050,157 @@ def normalize_contracts(payload: dict[str, Any], cnpj: str) -> pd.DataFrame:
     )
 
 
+def normalize_organ_documents(
+    payload: dict[str, Any],
+    cnpj: str,
+    *,
+    start_year: int,
+    end_year: int,
+    contract_enrichment: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    items = payload.get("items", []) or []
+    if not items:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(items).copy()
+
+    defaults = {
+        "description": "",
+        "item_url": "",
+        "title": "Documento PNCP",
+        "numero_controle_pncp": "",
+        "unidade_nome": "Nao informada",
+        "unidade_codigo": "",
+        "municipio_nome": "Nao informado",
+        "numero_sequencial": "",
+        "orgao_cnpj": "",
+        "situacao_nome": "Nao informado",
+        "orgao_nome": "Nao informado",
+        "modalidade_licitacao_nome": "Nao informada",
+        "tipo_nome": "Nao informado",
+        "tipo_contrato_nome": "Nao informado",
+        "document_type": "contrato",
+        "uf": "N/A",
+        "esfera_nome": "Nao informada",
+        "poder_nome": "Nao informado",
+    }
+    for column_name, default_value in defaults.items():
+        if column_name not in df.columns:
+            df[column_name] = default_value
+
+    df["orgao_cnpj"] = df["orgao_cnpj"].fillna("").astype(str)
+    df = df[df["orgao_cnpj"] == cnpj].copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    df["valor_global"] = pd.to_numeric(df.get("valor_global"), errors="coerce").fillna(0.0)
+    df["ano"] = pd.to_numeric(df.get("ano"), errors="coerce").astype("Int64")
+    df = df[df["ano"].between(start_year, end_year, inclusive="both")].copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    df["data_assinatura"] = pd.to_datetime(df.get("data_assinatura"), errors="coerce")
+    df["data_publicacao_pncp"] = pd.to_datetime(df.get("data_publicacao_pncp"), errors="coerce")
+    df["data_atualizacao_pncp"] = pd.to_datetime(df.get("data_atualizacao_pncp"), errors="coerce")
+    df["data_referencia"] = (
+        df["data_assinatura"]
+        .fillna(df["data_publicacao_pncp"])
+        .fillna(df["data_atualizacao_pncp"])
+    )
+    df["mes_ano"] = df["data_referencia"].dt.to_period("M").dt.to_timestamp()
+    df["link_pncp"] = df["item_url"].fillna("").apply(
+        lambda value: f"{APP_BASE_URL}{value}" if value else APP_BASE_URL
+    )
+    df["objeto"] = df["description"].fillna("Sem descricao publicada")
+    df["titulo"] = df["title"].fillna("Documento PNCP")
+    df["document_type"] = df["document_type"].fillna("contrato")
+    df["document_type_label"] = df["document_type"].map(
+        {
+            "contrato": "Contratos e empenhos",
+            "edital": "Compras/Licitacoes",
+            "ata": "Atas",
+        }
+    ).fillna("Outros documentos")
+    df["fornecedor_cnpj"] = ""
+    df["fornecedor_nome"] = df["document_type"].map(
+        {
+            "edital": "Nao se aplica",
+            "ata": "Nao informado",
+        }
+    ).fillna("Nao informado")
+
+    if contract_enrichment is not None and not contract_enrichment.empty:
+        df = df.merge(
+            contract_enrichment,
+            how="left",
+            on="numero_controle_pncp",
+        )
+        df["fornecedor_cnpj"] = df.get("fornecedor_cnpj_x", "").fillna("")
+        df["fornecedor_nome"] = df.get("fornecedor_nome_x", "Nao informado").fillna("Nao informado")
+        contract_mask = df["document_type"].eq("contrato")
+        df.loc[contract_mask, "fornecedor_cnpj"] = (
+            df.loc[contract_mask, "fornecedor_cnpj_y"].fillna(df.loc[contract_mask, "fornecedor_cnpj"]).fillna("")
+        )
+        df.loc[contract_mask, "fornecedor_nome"] = (
+            df.loc[contract_mask, "fornecedor_nome_y"].fillna(df.loc[contract_mask, "fornecedor_nome"]).fillna("Nao informado")
+        )
+        df.loc[contract_mask, "valor_global"] = (
+            df.loc[contract_mask, "valor_global_api"].fillna(df.loc[contract_mask, "valor_global"])
+        )
+        df.loc[contract_mask, "data_assinatura"] = (
+            df.loc[contract_mask, "data_assinatura_api"].fillna(df.loc[contract_mask, "data_assinatura"])
+        )
+        df.loc[contract_mask, "ano"] = df.loc[contract_mask, "ano_api"].fillna(df.loc[contract_mask, "ano"])
+        drop_columns = [
+            "fornecedor_cnpj_x",
+            "fornecedor_cnpj_y",
+            "fornecedor_nome_x",
+            "fornecedor_nome_y",
+            "valor_global_api",
+            "data_assinatura_api",
+            "ano_api",
+        ]
+        df = df.drop(columns=[column for column in drop_columns if column in df.columns])
+
+    display_order = [
+        "document_type",
+        "document_type_label",
+        "numero_controle_pncp",
+        "titulo",
+        "objeto",
+        "orgao_nome",
+        "orgao_cnpj",
+        "unidade_codigo",
+        "unidade_nome",
+        "municipio_nome",
+        "uf",
+        "situacao_nome",
+        "modalidade_licitacao_nome",
+        "tipo_nome",
+        "tipo_contrato_nome",
+        "valor_global",
+        "data_assinatura",
+        "data_publicacao_pncp",
+        "data_atualizacao_pncp",
+        "data_referencia",
+        "ano",
+        "fornecedor_cnpj",
+        "fornecedor_nome",
+        "link_pncp",
+        "numero_sequencial",
+        "esfera_nome",
+        "poder_nome",
+    ]
+
+    available_order = [column for column in display_order if column in df.columns]
+    remainder = [column for column in df.columns if column not in available_order]
+    return df[available_order + remainder].sort_values(
+        by=["data_referencia", "valor_global"],
+        ascending=[False, False],
+        na_position="last",
+    )
+
+
 def apply_dashboard_filters(
     df: pd.DataFrame,
     *,
@@ -1001,25 +1226,77 @@ def apply_dashboard_filters(
     return filtered
 
 
-def render_masthead() -> None:
+def apply_organ_dashboard_filters(
+    df: pd.DataFrame,
+    *,
+    search_text: str,
+    document_types: list[str],
+    years: list[int],
+    units: list[str],
+    suppliers: list[str],
+    modalities: list[str],
+    situations: list[str],
+) -> pd.DataFrame:
+    filtered = df.copy()
+
+    if search_text.strip():
+        normalized_text = search_text.strip().lower()
+        filtered = filtered[
+            filtered["objeto"].fillna("").str.lower().str.contains(normalized_text)
+            | filtered["titulo"].fillna("").str.lower().str.contains(normalized_text)
+            | filtered["numero_controle_pncp"].fillna("").str.lower().str.contains(normalized_text)
+        ]
+
+    if document_types:
+        filtered = filtered[filtered["document_type"].isin(document_types)]
+    if years:
+        filtered = filtered[filtered["ano"].isin(years)]
+    if units:
+        filtered = filtered[filtered["unidade_nome"].isin(units)]
+    if suppliers:
+        filtered = filtered[filtered["fornecedor_nome"].isin(suppliers)]
+    if modalities:
+        filtered = filtered[filtered["modalidade_licitacao_nome"].isin(modalities)]
+    if situations:
+        filtered = filtered[filtered["situacao_nome"].isin(situations)]
+
+    return filtered
+
+
+def render_masthead(query_scope: str) -> None:
+    if query_scope == "organ":
+        title = "Panorama anual de orgaos publicos no PNCP"
+        description = (
+            "Consulte contratos, compras/licitações e atas a partir do CNPJ do orgao, "
+            "aplique faixa obrigatoria de anos e explore a base consolidada por objeto, unidade e fornecedor."
+        )
+        note = (
+            "Busca publica do portal PNCP com recorte operacional por faixa de anos e apoio do endpoint "
+            "oficial de contratos para enriquecimento de fornecedor."
+        )
+    else:
+        title = "Dossie de contratos publicos por fornecedor"
+        description = (
+            "Consulte contratos e empenhos publicados no PNCP a partir do CNPJ da empresa, "
+            "aplique recortes operacionais e exporte a base tratada para Excel ou CSV."
+        )
+        note = (
+            "Busca publica do portal PNCP com paginacao automatica e enriquecimento por endpoint "
+            "de detalhe para verificacao do fornecedor."
+        )
+
     st.markdown(
-        """
+        f"""
         <section class="masthead">
             <div class="masthead-grid">
                 <div>
                     <span class="eyebrow">Painel analitico do PNCP</span>
-                    <h1>Dossie de contratos publicos por fornecedor</h1>
-                    <p>
-                        Consulte contratos e empenhos publicados no PNCP a partir do CNPJ da empresa,
-                        aplique recortes operacionais e exporte a base tratada para Excel ou CSV.
-                    </p>
+                    <h1>{title}</h1>
+                    <p>{description}</p>
                 </div>
                 <div class="masthead-note">
                     <strong>Fonte operacional</strong>
-                    <span>
-                        Busca publica do portal PNCP com paginacao automatica e enriquecimento por endpoint
-                        de detalhe para verificacao do fornecedor.
-                    </span>
+                    <span>{note}</span>
                 </div>
             </div>
         </section>
@@ -1077,6 +1354,51 @@ def render_filter_summary(
                 <span class="pill">{coverage_label}</span>
                 <span class="pill">Recorte amostral: {sample_checked} contrato(s)</span>
                 <span class="pill">{quality_label}</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_organ_filter_summary(
+    *,
+    cnpj: str,
+    organ_name: str,
+    total_records: int,
+    retrieved_records: int,
+    exact_records: int,
+    start_year: int,
+    end_year: int,
+    search_strategy: str,
+    is_partial: bool,
+    enrichment_status: str,
+) -> None:
+    if start_year == end_year:
+        period_label = f"Ano analisado: {start_year}"
+    else:
+        period_label = f"Faixa anual: {start_year} a {end_year}"
+
+    strategy_label = "Cobertura bidirecional do indice" if search_strategy == "janela_dupla" else "Janela unica do indice"
+    coverage_label = (
+        f"Base exata no recorte: {format_integer(exact_records)} registros"
+        if not is_partial
+        else f"Base exata no recorte: {format_integer(exact_records)} de {format_integer(total_records)}"
+    )
+
+    st.markdown(
+        f"""
+        <div class="info-card">
+            <p class="section-title">{organ_name or "Orgao publico consultado"}</p>
+            <p class="section-copy">
+                CNPJ {format_cnpj_display(cnpj)} | {format_integer(retrieved_records)} registros recuperados do indice
+            </p>
+            <div class="pill-row">
+                <span class="pill">{period_label}</span>
+                <span class="pill">{strategy_label}</span>
+                <span class="pill">{coverage_label}</span>
+                <span class="pill">{enrichment_status}</span>
+                <span class="pill">{format_integer(total_records)} registros brutos na busca</span>
             </div>
         </div>
         """,
@@ -1440,6 +1762,158 @@ def build_value_bands(df: pd.DataFrame) -> pd.DataFrame:
     return summary
 
 
+def build_document_mix_chart(df: pd.DataFrame) -> go.Figure:
+    grouped = (
+        df.groupby("document_type_label", dropna=False)
+        .agg(quantidade=("numero_controle_pncp", "count"))
+        .reset_index()
+        .sort_values("quantidade", ascending=False)
+    )
+    if grouped.empty:
+        return build_empty_chart("Nao ha documentos suficientes para compor o panorama.")
+
+    fig = go.Figure(
+        go.Pie(
+            labels=grouped["document_type_label"],
+            values=grouped["quantidade"],
+            hole=0.58,
+            marker=dict(colors=[COLOR_PRIMARY, COLOR_ACCENT, COLOR_PRIMARY_SOFT][: len(grouped)]),
+            textinfo="percent+label",
+            hovertemplate="<b>%{label}</b><br>Qtd. registros: %{value}<extra></extra>",
+        )
+    )
+    apply_chart_theme(fig, height=430)
+    fig.update_layout(showlegend=False)
+    return fig
+
+
+def build_top_suppliers_chart(df: pd.DataFrame) -> go.Figure:
+    contracts_df = df[
+        df["document_type"].eq("contrato")
+        & df["fornecedor_nome"].fillna("").ne("")
+        & ~df["fornecedor_nome"].isin(["Nao informado", "Nao se aplica"])
+    ].copy()
+    grouped = (
+        contracts_df.groupby("fornecedor_nome", dropna=False)
+        .agg(quantidade=("numero_controle_pncp", "count"), valor_total=("valor_global", "sum"))
+        .reset_index()
+        .sort_values("valor_total", ascending=False)
+        .head(10)
+        .sort_values("valor_total", ascending=True)
+    )
+    if grouped.empty:
+        return build_empty_chart("Os contratos deste recorte nao trouxeram fornecedores suficientes para ranking.")
+
+    grouped["fornecedor_curto"] = grouped["fornecedor_nome"].apply(lambda value: shorten_label(value, limit=34))
+    grouped["valor_label"] = grouped["valor_total"].apply(format_currency)
+    grouped["qtd_label"] = grouped["quantidade"].apply(format_integer)
+
+    fig = go.Figure()
+    fig.add_bar(
+        x=grouped["valor_total"],
+        y=grouped["fornecedor_curto"],
+        orientation="h",
+        marker=dict(color=COLOR_PRIMARY, line=dict(width=0)),
+        customdata=grouped[["fornecedor_nome", "qtd_label", "valor_label"]],
+        hovertemplate=(
+            "<b>%{customdata[0]}</b><br>"
+            "Valor total: %{customdata[2]}<br>"
+            "Qtd. contratos: %{customdata[1]}<extra></extra>"
+        ),
+    )
+    apply_chart_theme(fig, height=460)
+    fig.update_layout(showlegend=False, bargap=0.24)
+    fig.update_xaxes(title="Valor total contratado", tickprefix="R$ ")
+    fig.update_yaxes(title="", showgrid=False)
+    return fig
+
+
+def build_top_units_chart(df: pd.DataFrame) -> go.Figure:
+    grouped = (
+        df.groupby(["unidade_nome", "uf"], dropna=False)
+        .agg(quantidade=("numero_controle_pncp", "count"), valor_total=("valor_global", "sum"))
+        .reset_index()
+        .sort_values("valor_total", ascending=False)
+        .head(10)
+        .sort_values("valor_total", ascending=True)
+    )
+    if grouped.empty:
+        return build_empty_chart("Nao ha unidades suficientes para o ranking.")
+
+    grouped["unidade_label"] = grouped.apply(
+        lambda row: shorten_label(f"{row['unidade_nome']} ({row['uf']})", limit=34),
+        axis=1,
+    )
+    grouped["valor_label"] = grouped["valor_total"].apply(format_currency)
+    grouped["qtd_label"] = grouped["quantidade"].apply(format_integer)
+
+    fig = go.Figure()
+    fig.add_bar(
+        x=grouped["valor_total"],
+        y=grouped["unidade_label"],
+        orientation="h",
+        marker=dict(color=COLOR_ACCENT, line=dict(width=0)),
+        customdata=grouped[["unidade_nome", "uf", "qtd_label", "valor_label"]],
+        hovertemplate=(
+            "<b>%{customdata[0]}</b><br>"
+            "UF: %{customdata[1]}<br>"
+            "Qtd. registros: %{customdata[2]}<br>"
+            "Valor total: %{customdata[3]}<extra></extra>"
+        ),
+    )
+    apply_chart_theme(fig, height=460)
+    fig.update_layout(showlegend=False, bargap=0.24)
+    fig.update_xaxes(title="Valor total", tickprefix="R$ ")
+    fig.update_yaxes(title="", showgrid=False)
+    return fig
+
+
+def build_modality_chart(df: pd.DataFrame) -> go.Figure:
+    grouped = (
+        df.groupby("modalidade_licitacao_nome", dropna=False)
+        .agg(quantidade=("numero_controle_pncp", "count"))
+        .reset_index()
+        .sort_values("quantidade", ascending=False)
+        .head(10)
+        .sort_values("quantidade", ascending=True)
+    )
+    if grouped.empty:
+        return build_empty_chart("Nao ha modalidades suficientes para este recorte.")
+
+    grouped["modalidade_curta"] = grouped["modalidade_licitacao_nome"].apply(lambda value: shorten_label(value, limit=28))
+
+    fig = go.Figure()
+    fig.add_bar(
+        x=grouped["quantidade"],
+        y=grouped["modalidade_curta"],
+        orientation="h",
+        marker=dict(color=COLOR_PRIMARY_SOFT, line=dict(width=0)),
+        customdata=grouped["modalidade_licitacao_nome"],
+        hovertemplate="<b>%{customdata}</b><br>Qtd. registros: %{x}<extra></extra>",
+    )
+    apply_chart_theme(fig, height=430)
+    fig.update_layout(showlegend=False, bargap=0.28)
+    fig.update_xaxes(title="Quantidade")
+    fig.update_yaxes(title="", showgrid=False)
+    return fig
+
+
+def build_top_objects_summary(df: pd.DataFrame, *, limit: int = 15) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame()
+
+    objects_df = df.copy()
+    objects_df["objeto_grupo"] = objects_df["objeto"].fillna("Sem descricao publicada").apply(lambda value: shorten_label(value, limit=100))
+
+    return (
+        objects_df.groupby("objeto_grupo", dropna=False)
+        .agg(quantidade=("numero_controle_pncp", "count"), valor_total=("valor_global", "sum"))
+        .reset_index()
+        .sort_values(["quantidade", "valor_total"], ascending=[False, False])
+        .head(limit)
+    )
+
+
 def prepare_export_payload(
     df: pd.DataFrame,
     meta: dict[str, Any],
@@ -1448,7 +1922,11 @@ def prepare_export_payload(
     include_charts: bool,
     filter_summary: str,
 ) -> tuple[bytes, str, str, str]:
-    file_stem = f"pncp_contratos_{meta.get('cnpj', '')}"
+    query_scope = meta.get("query_scope", "supplier")
+    if query_scope == "organ":
+        file_stem = f"pncp_orgao_{meta.get('cnpj', '')}_{meta.get('start_year', '-')}_{meta.get('end_year', '-')}"
+    else:
+        file_stem = f"pncp_contratos_{meta.get('cnpj', '')}"
 
     if export_format == "CSV":
         payload = dataframe_to_csv_bytes(df)
@@ -1465,11 +1943,20 @@ def prepare_export_payload(
 
     chart_payload = None
     if include_charts:
-        chart_payload = {
-            "top_orgs": build_top_orgs_chart(df),
-            "timeline": build_timeline_chart(df),
-            "value_band": build_value_band_chart(df),
-        }
+        if query_scope == "organ":
+            contracts_df = df[df["document_type"].eq("contrato")].copy()
+            timeline_source = contracts_df if not contracts_df.empty else df
+            chart_payload = {
+                "top_orgs": build_top_suppliers_chart(df),
+                "timeline": build_yearly_chart(timeline_source),
+                "value_band": build_document_mix_chart(df),
+            }
+        else:
+            chart_payload = {
+                "top_orgs": build_top_orgs_chart(df),
+                "timeline": build_timeline_chart(df),
+                "value_band": build_value_band_chart(df),
+            }
 
     report_mode = "full" if export_format == "PDF Completo" else "executive"
     payload = pdf_generator.generate_pdf(
@@ -1491,8 +1978,22 @@ def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
 def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Contratos")
+        sanitize_dataframe_for_excel(df).to_excel(writer, index=False, sheet_name="Contratos")
     return output.getvalue()
+
+
+def sanitize_excel_text(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    return EXCEL_ILLEGAL_CHARS_RE.sub("", value)
+
+
+def sanitize_dataframe_for_excel(df: pd.DataFrame) -> pd.DataFrame:
+    sanitized_df = df.copy()
+    object_columns = sanitized_df.select_dtypes(include=["object", "string"]).columns
+    for column_name in object_columns:
+        sanitized_df[column_name] = sanitized_df[column_name].map(sanitize_excel_text)
+    return sanitized_df
 
 
 def build_excel_report_bytes(df: pd.DataFrame, meta: dict[str, Any], filter_summary: str) -> bytes:
@@ -1501,112 +2002,228 @@ def build_excel_report_bytes(df: pd.DataFrame, meta: dict[str, Any], filter_summ
         if column_name in export_df.columns:
             export_df[column_name] = pd.to_datetime(export_df[column_name], errors="coerce").dt.strftime("%Y-%m-%d")
 
-    summary_rows = [
-        ["Fornecedor", meta.get("supplier_name", "Fornecedor consultado")],
-        ["CNPJ", meta.get("cnpj", "-")],
-        ["Contratos indexados", meta.get("total_records", len(df))],
-        ["Contratos recuperados", meta.get("retrieved_records", len(df))],
-        ["Valor total", format_currency(df["valor_global"].sum())],
-        ["Valor medio", format_currency(df["valor_global"].mean())],
-        ["Orgaos distintos", format_integer(df["orgao_nome"].nunique())],
-        ["Filtros ativos", filter_summary],
-        ["Atualizado em", meta.get("fetched_at", "-")],
-    ]
-    summary_df = pd.DataFrame(summary_rows, columns=["Metrica", "Valor"])
+    query_scope = meta.get("query_scope", "supplier")
+    if query_scope == "organ":
+        summary_rows = [
+            ["Escopo", "Consulta por orgao publico"],
+            ["Orgao", meta.get("organ_name", "Orgao publico consultado")],
+            ["CNPJ do orgao", meta.get("cnpj", "-")],
+            ["Faixa de anos", f"{meta.get('start_year', '-')} a {meta.get('end_year', '-')}"],
+            ["Registros brutos no indice", meta.get("total_records", len(df))],
+            ["Registros recuperados", meta.get("retrieved_records", len(df))],
+            ["Base exata no recorte", meta.get("exact_records", len(df))],
+            ["Valor total", format_currency(df["valor_global"].sum())],
+            ["Fornecedores distintos", format_integer(df["fornecedor_nome"].replace(["Nao informado", "Nao se aplica"], pd.NA).dropna().nunique())],
+            ["Unidades distintas", format_integer(df["unidade_nome"].nunique())],
+            ["Filtros ativos", filter_summary],
+            ["Atualizado em", meta.get("fetched_at", "-")],
+        ]
+        ranking_df = (
+            df[df["document_type"].eq("contrato")]
+            .groupby("fornecedor_nome", dropna=False)
+            .agg(quantidade=("numero_controle_pncp", "count"), valor_total=("valor_global", "sum"))
+            .reset_index()
+            .sort_values("valor_total", ascending=False)
+            .head(20)
+            .rename(columns={"fornecedor_nome": "fornecedor"})
+        )
+        ranking_sheet_name = "Top_fornecedores"
+        export_sheet_name = "Base_consolidada"
+    else:
+        summary_rows = [
+            ["Escopo", "Consulta por fornecedor"],
+            ["Fornecedor", meta.get("supplier_name", "Fornecedor consultado")],
+            ["CNPJ", meta.get("cnpj", "-")],
+            ["Contratos indexados", meta.get("total_records", len(df))],
+            ["Contratos recuperados", meta.get("retrieved_records", len(df))],
+            ["Valor total", format_currency(df["valor_global"].sum())],
+            ["Valor medio", format_currency(df["valor_global"].mean())],
+            ["Orgaos distintos", format_integer(df["orgao_nome"].nunique())],
+            ["Filtros ativos", filter_summary],
+            ["Atualizado em", meta.get("fetched_at", "-")],
+        ]
+        ranking_df = (
+            df.groupby("orgao_nome", dropna=False)
+            .agg(quantidade=("numero_controle_pncp", "count"), valor_total=("valor_global", "sum"))
+            .reset_index()
+            .sort_values("valor_total", ascending=False)
+            .head(20)
+        )
+        ranking_sheet_name = "Top_orgaos"
+        export_sheet_name = "Contratos"
 
-    top_orgaos_df = (
-        df.groupby("orgao_nome", dropna=False)
-        .agg(quantidade=("numero_controle_pncp", "count"), valor_total=("valor_global", "sum"))
-        .reset_index()
-        .sort_values("valor_total", ascending=False)
-        .head(20)
-    )
+    summary_df = pd.DataFrame(summary_rows, columns=["Metrica", "Valor"])
+    summary_df = sanitize_dataframe_for_excel(summary_df)
+    ranking_df = sanitize_dataframe_for_excel(ranking_df)
+    export_df = sanitize_dataframe_for_excel(export_df)
 
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         summary_df.to_excel(writer, index=False, sheet_name="Resumo")
-        top_orgaos_df.to_excel(writer, index=False, sheet_name="Top_orgaos")
-        export_df.to_excel(writer, index=False, sheet_name="Contratos")
+        ranking_df.to_excel(writer, index=False, sheet_name=ranking_sheet_name)
+        export_df.to_excel(writer, index=False, sheet_name=export_sheet_name)
 
     return output.getvalue()
 
 
-def render_sidebar() -> tuple[bool, str, date | None, date | None]:
+def render_sidebar() -> dict[str, Any]:
     with st.sidebar:
-        st.markdown("## Consulta do fornecedor")
-        st.caption("Informe o CNPJ e, se quiser, aplique um recorte temporal para leitura operacional.")
+        st.markdown("## Jornada de consulta")
+        st.caption("Alterne entre fornecedor e orgao publico sem misturar estado, filtros ou exportacoes.")
 
-        st.session_state.setdefault("search_cnpj", "")
-        st.session_state.setdefault("search_use_period", False)
-        st.session_state.setdefault("search_start_date", date(date.today().year - 1, 1, 1))
-        st.session_state.setdefault("search_end_date", date.today())
+        st.session_state.setdefault("query_scope", "supplier")
+        scope_label = st.radio(
+            "Escopo",
+            options=["Fornecedor", "Orgao publico"],
+            index=0 if st.session_state.get("query_scope", "supplier") == "supplier" else 1,
+            horizontal=True,
+            key="query_scope_selector",
+            label_visibility="collapsed",
+        )
+        query_scope = "supplier" if scope_label == "Fornecedor" else "organ"
+        st.session_state["query_scope"] = query_scope
 
-        with st.form("search_form", clear_on_submit=False):
-            st.markdown("**CNPJ do fornecedor**")
-            cnpj_input = st.text_input(
-                "CNPJ",
-                placeholder="00.000.000/0000-00",
-                help="Aceita entrada com ou sem pontuacao.",
-                label_visibility="collapsed",
-                key="search_cnpj",
-            )
+        submitted = False
+        cnpj_input = ""
+        start_date: date | None = None
+        end_date: date | None = None
+        start_year = date.today().year
+        end_year = date.today().year
 
-            use_period_filter = st.toggle(
-                "Aplicar recorte por data de assinatura",
-                help="Desligado: considera todo o historico indexado na busca do portal.",
-                key="search_use_period",
-            )
+        if query_scope == "supplier":
+            st.markdown("## Consulta do fornecedor")
+            st.caption("Informe o CNPJ e, se quiser, aplique um recorte temporal para leitura operacional.")
 
-            start_date: date | None = None
-            end_date: date | None = None
+            st.session_state.setdefault("supplier_search_cnpj", "")
+            st.session_state.setdefault("supplier_search_use_period", False)
+            st.session_state.setdefault("supplier_search_start_date", date(date.today().year - 1, 1, 1))
+            st.session_state.setdefault("supplier_search_end_date", date.today())
 
-            if use_period_filter:
-                period_col_1, period_col_2 = st.columns(2)
-                with period_col_1:
-                    st.caption("Inicial")
-                    start_date = st.date_input(
-                        "Inicial",
-                        format="DD/MM/YYYY",
-                        label_visibility="collapsed",
-                        key="search_start_date",
+            with st.form("supplier_search_form", clear_on_submit=False):
+                st.markdown("**CNPJ do fornecedor**")
+                cnpj_input = st.text_input(
+                    "CNPJ do fornecedor",
+                    placeholder="00.000.000/0000-00",
+                    help="Aceita entrada com ou sem pontuacao.",
+                    label_visibility="collapsed",
+                    key="supplier_search_cnpj",
+                )
+
+                use_period_filter = st.toggle(
+                    "Aplicar recorte por data de assinatura",
+                    help="Desligado: considera todo o historico indexado na busca do portal.",
+                    key="supplier_search_use_period",
+                )
+
+                if use_period_filter:
+                    period_col_1, period_col_2 = st.columns(2)
+                    with period_col_1:
+                        st.caption("Inicial")
+                        start_date = st.date_input(
+                            "Inicial",
+                            format="DD/MM/YYYY",
+                            label_visibility="collapsed",
+                            key="supplier_search_start_date",
+                        )
+                    with period_col_2:
+                        st.caption("Final")
+                        end_date = st.date_input(
+                            "Final",
+                            format="DD/MM/YYYY",
+                            label_visibility="collapsed",
+                            key="supplier_search_end_date",
+                        )
+
+                submitted = st.form_submit_button("Buscar contratos", use_container_width=True)
+        else:
+            st.markdown("## Consulta do orgao publico")
+            st.caption("Informe o CNPJ do orgao e uma faixa obrigatoria de anos para consolidar contratos, compras e atas.")
+
+            current_year = date.today().year
+            available_years = list(range(current_year, 2015, -1))
+            st.session_state.setdefault("organ_search_cnpj", "")
+            st.session_state.setdefault("organ_search_start_year", current_year)
+            st.session_state.setdefault("organ_search_end_year", current_year)
+
+            with st.form("organ_search_form", clear_on_submit=False):
+                st.markdown("**CNPJ do orgao**")
+                cnpj_input = st.text_input(
+                    "CNPJ do orgao",
+                    placeholder="00.000.000/0000-00",
+                    help="O v1 localiza o orgao por CNPJ exato.",
+                    label_visibility="collapsed",
+                    key="organ_search_cnpj",
+                )
+
+                year_col_1, year_col_2 = st.columns(2)
+                with year_col_1:
+                    start_year = st.selectbox(
+                        "Ano inicial",
+                        options=available_years,
+                        key="organ_search_start_year",
                     )
-                with period_col_2:
-                    st.caption("Final")
-                    end_date = st.date_input(
-                        "Final",
-                        format="DD/MM/YYYY",
-                        label_visibility="collapsed",
-                        key="search_end_date",
+                with year_col_2:
+                    end_year = st.selectbox(
+                        "Ano final",
+                        options=available_years,
+                        key="organ_search_end_year",
                     )
 
-            submitted = st.form_submit_button("Buscar contratos", use_container_width=True)
+                submitted = st.form_submit_button("Buscar orgao", use_container_width=True)
 
         st.markdown("---")
         st.markdown("### Fonte")
-        st.caption("Busca publica do portal PNCP com enriquecimento no endpoint oficial de detalhe.")
-        st.markdown(
-            """
-            - Portal: `pncp.gov.br`
-            - Atualizacao: tempo real
-            - Janela robusta: ate 20 mil contratos
-            - Exportacao: Excel e CSV
-            """
-        )
+        if query_scope == "supplier":
+            st.caption("Busca publica do portal PNCP com enriquecimento no endpoint oficial de detalhe.")
+            st.markdown(
+                """
+                - Portal: `pncp.gov.br`
+                - Atualizacao: tempo real
+                - Janela robusta: ate 20 mil contratos
+                - Exportacao: Excel e CSV
+                """
+            )
+        else:
+            st.caption("Panorama por orgao com indice publico do PNCP e apoio do endpoint oficial de contratos.")
+            st.markdown(
+                f"""
+                - Portal: `pncp.gov.br`
+                - Atualizacao: tempo real
+                - Faixa anual obrigatoria
+                - Limite inicial: ate {YEAR_RANGE_LIMIT} anos por consulta
+                """
+            )
 
         st.markdown("### Notas operacionais")
-        st.caption(
-            "Consultas volumosas podem levar alguns segundos. Acima de 20 mil itens no indice, aplique um recorte temporal para auditoria completa."
-        )
+        if query_scope == "supplier":
+            st.caption(
+                "Consultas volumosas podem levar alguns segundos. Acima de 20 mil itens no indice, aplique um recorte temporal para auditoria completa."
+            )
+        else:
+            st.caption(
+                "O modulo por orgao exige faixa de anos e valida o CNPJ exato do orgao na base. Se o indice ultrapassar a janela robusta, reduza o intervalo anual."
+            )
 
-    return submitted, cnpj_input, start_date, end_date
+    return {
+        "query_scope": query_scope,
+        "submitted": submitted,
+        "cnpj_input": cnpj_input,
+        "start_date": start_date,
+        "end_date": end_date,
+        "start_year": start_year,
+        "end_year": end_year,
+    }
 
 
 def initialize_state() -> None:
-    st.session_state.setdefault("contracts_df", None)
-    st.session_state.setdefault("query_meta", {})
+    st.session_state.setdefault("query_scope", "supplier")
+    st.session_state.setdefault("supplier_contracts_df", None)
+    st.session_state.setdefault("supplier_query_meta", {})
+    st.session_state.setdefault("organ_documents_df", None)
+    st.session_state.setdefault("organ_query_meta", {})
 
 
-def run_search(cnpj_input: str, start_date: date | None, end_date: date | None) -> None:
+def run_supplier_search(cnpj_input: str, start_date: date | None, end_date: date | None) -> None:
     cnpj = format_cnpj(cnpj_input)
     if not cnpj:
         ui_alert("error", "Informe um CNPJ para iniciar a consulta.")
@@ -1624,8 +2241,9 @@ def run_search(cnpj_input: str, start_date: date | None, end_date: date | None) 
         payload = fetch_contract_search(cnpj)
         contracts_df = normalize_contracts(payload, cnpj)
 
-    st.session_state["contracts_df"] = contracts_df
-    st.session_state["query_meta"] = {
+    st.session_state["supplier_contracts_df"] = contracts_df
+    st.session_state["supplier_query_meta"] = {
+        "query_scope": "supplier",
         "cnpj": cnpj,
         "supplier_name": payload.get("supplier_name") or "Fornecedor consultado",
         "total_records": payload.get("total_records", len(contracts_df)),
@@ -1640,6 +2258,66 @@ def run_search(cnpj_input: str, start_date: date | None, end_date: date | None) 
         "requested_end_date": end_date,
         "fetched_at": datetime.now().strftime("%d/%m/%Y %H:%M"),
     }
+    st.session_state["prepared_export_supplier"] = None
+
+
+def run_organ_search(cnpj_input: str, start_year: int, end_year: int) -> None:
+    cnpj = format_cnpj(cnpj_input)
+    if not cnpj:
+        ui_alert("error", "Informe o CNPJ do orgao para iniciar a consulta.")
+        st.stop()
+
+    if not validate_cnpj(cnpj):
+        ui_alert("error", "O CNPJ do orgao informado e invalido. Revise os digitos e tente novamente.")
+        st.stop()
+
+    if start_year > end_year:
+        ui_alert("error", "O ano inicial nao pode ser maior que o ano final.")
+        st.stop()
+
+    if (end_year - start_year + 1) > YEAR_RANGE_LIMIT:
+        ui_alert(
+            "error",
+            f"A faixa inicial esta limitada a ate {YEAR_RANGE_LIMIT} anos por consulta. Reduza o intervalo e tente novamente.",
+        )
+        st.stop()
+
+    with st.spinner(f"Consultando panorama do orgao {format_cnpj_display(cnpj)}..."):
+        search_payload = fetch_search_index(cnpj, document_types="edital|ata|contrato")
+        enrichment_status = "Contratos enriquecidos pela API oficial"
+        try:
+            contract_enrichment = fetch_organ_contract_enrichment(cnpj, start_year, end_year)
+        except PncpApiError:
+            contract_enrichment = pd.DataFrame()
+            enrichment_status = "Enriquecimento de fornecedor indisponivel"
+
+        organ_df = normalize_organ_documents(
+            search_payload,
+            cnpj,
+            start_year=start_year,
+            end_year=end_year,
+            contract_enrichment=contract_enrichment,
+        )
+
+    organ_name = organ_df["orgao_nome"].dropna().iloc[0] if not organ_df.empty else "Orgao publico consultado"
+    st.session_state["organ_documents_df"] = organ_df
+    st.session_state["organ_query_meta"] = {
+        "query_scope": "organ",
+        "cnpj": cnpj,
+        "organ_name": organ_name,
+        "total_records": search_payload.get("total_records", len(organ_df)),
+        "total_pages": search_payload.get("total_pages", 1),
+        "retrieved_records": search_payload.get("retrieved_records", len(organ_df)),
+        "search_strategy": search_payload.get("search_strategy", "janela_unica"),
+        "retrieved_windows": search_payload.get("retrieved_windows", 1),
+        "is_partial": search_payload.get("is_partial", False),
+        "exact_records": len(organ_df),
+        "start_year": start_year,
+        "end_year": end_year,
+        "enrichment_status": enrichment_status,
+        "fetched_at": datetime.now().strftime("%d/%m/%Y %H:%M"),
+    }
+    st.session_state["prepared_export_organ"] = None
 
 
 def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
@@ -2022,17 +2700,17 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
             export_format = st.selectbox(
                 "Formato do relatorio",
                 ["PDF Executivo", "PDF Completo", "Excel", "CSV"],
-                key="export_format",
+                key="supplier_export_format",
             )
         with export_col_2:
             include_charts = st.checkbox(
                 "Incluir graficos no PDF",
                 value=True,
-                key="export_include_charts",
+                key="supplier_export_include_charts",
                 help="Quando desmarcado, o PDF fica mais leve e rapido para gerar.",
             )
 
-        if st.button("Preparar pacote de exportacao", use_container_width=True, key="prepare_export_button"):
+        if st.button("Preparar pacote de exportacao", use_container_width=True, key="supplier_prepare_export_button"):
             with st.spinner("Gerando arquivo..."):
                 try:
                     payload, filename, mime_type, label = prepare_export_payload(
@@ -2045,7 +2723,7 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
                 except Exception as exc:
                     ui_alert("error", f"Nao foi possivel gerar o arquivo agora: {exc}")
                 else:
-                    st.session_state["prepared_export"] = {
+                    st.session_state["prepared_export_supplier"] = {
                         "payload": payload,
                         "filename": filename,
                         "mime_type": mime_type,
@@ -2053,7 +2731,7 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
                     }
                     ui_alert("success", f"Arquivo preparado com sucesso: {filename}")
 
-        prepared_export = st.session_state.get("prepared_export")
+        prepared_export = st.session_state.get("prepared_export_supplier")
         if prepared_export:
             st.download_button(
                 prepared_export["label"],
@@ -2096,94 +2774,712 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
     )
 
 
-def render_initial_screen() -> None:
-    ui_empty_state(
-        icon="🔎",
-        title="Pronto para consultar o fornecedor",
-        message="Informe o CNPJ no menu lateral, execute a busca e navegue por metricas, series temporais, base completa e exportacoes.",
-        badges=["Busca por CNPJ", "Graficos interativos", "Exportacao imediata"],
+def render_organ_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
+    render_organ_filter_summary(
+        cnpj=meta.get("cnpj", ""),
+        organ_name=meta.get("organ_name", "Orgao publico consultado"),
+        total_records=meta.get("total_records", len(df)),
+        retrieved_records=meta.get("retrieved_records", len(df)),
+        exact_records=meta.get("exact_records", len(df)),
+        start_year=meta.get("start_year", date.today().year),
+        end_year=meta.get("end_year", date.today().year),
+        search_strategy=meta.get("search_strategy", "janela_unica"),
+        is_partial=meta.get("is_partial", False),
+        enrichment_status=meta.get("enrichment_status", "Consulta consolidada"),
     )
+
+    if meta.get("is_partial", False):
+        ui_alert(
+            "warning",
+            (
+                f"A busca por este orgao extrapolou a janela robusta do indice publico. "
+                f"A base exata no recorte anual mostra {format_integer(meta.get('exact_records', len(df)))} registros, "
+                "mas para auditoria total vale reduzir ainda mais a faixa de anos."
+            ),
+        )
+
+    if meta.get("enrichment_status") != "Contratos enriquecidos pela API oficial":
+        ui_alert(
+            "warning",
+            "O enriquecimento oficial de fornecedores ficou indisponivel nesta execucao. O panorama segue valido, mas alguns contratos podem aparecer sem fornecedor preenchido.",
+        )
+
+    if df.empty:
+        ui_empty_state(
+            icon="🏛️",
+            title="Nenhum registro encontrado para o orgao",
+            message="Nao localizamos contratos, compras/licitações ou atas para o CNPJ e a faixa anual informados.",
+            badges=["Revise o CNPJ", "Ajuste a faixa de anos", "Confira a indexacao no portal"],
+        )
+        return
+
+    section_header(
+        "Filtros dinamicos da analise",
+        "O panorama completo do orgao responde aos recortes por objeto, documento, unidade, fornecedor, modalidade e situacao.",
+        icon="🎛️",
+    )
+
+    search_text = st.text_input(
+        "Busca textual por objeto, titulo ou numero PNCP",
+        placeholder="Ex.: medicamento, limpeza, 0039446...",
+        key="organ_filter_text",
+    )
+
+    filter_col_1, filter_col_2, filter_col_3 = st.columns(3)
+    with filter_col_1:
+        selected_document_types = st.multiselect(
+            "Tipo de documento",
+            options=["contrato", "edital", "ata"],
+            default=[],
+            format_func=lambda value: {
+                "contrato": "Contratos e empenhos",
+                "edital": "Compras/Licitacoes",
+                "ata": "Atas",
+            }.get(value, value),
+            key="organ_filter_document_types",
+        )
+    with filter_col_2:
+        selected_years = st.multiselect(
+            "Ano",
+            options=sorted([int(year) for year in df["ano"].dropna().unique().tolist()], reverse=True),
+            default=[],
+            key="organ_filter_years",
+        )
+    with filter_col_3:
+        selected_units = st.multiselect(
+            "Unidade administrativa",
+            options=sorted(df["unidade_nome"].dropna().unique().tolist()),
+            default=[],
+            key="organ_filter_units",
+        )
+
+    filter_col_4, filter_col_5, filter_col_6 = st.columns(3)
+    with filter_col_4:
+        supplier_options = sorted(
+            [
+                value
+                for value in df["fornecedor_nome"].dropna().unique().tolist()
+                if value and value not in {"Nao informado", "Nao se aplica"}
+            ]
+        )
+        selected_suppliers = st.multiselect(
+            "Fornecedor",
+            options=supplier_options,
+            default=[],
+            key="organ_filter_suppliers",
+        )
+    with filter_col_5:
+        selected_modalities = st.multiselect(
+            "Modalidade",
+            options=sorted(df["modalidade_licitacao_nome"].dropna().unique().tolist()),
+            default=[],
+            key="organ_filter_modalities",
+        )
+    with filter_col_6:
+        selected_situations = st.multiselect(
+            "Situacao",
+            options=sorted(df["situacao_nome"].dropna().unique().tolist()),
+            default=[],
+            key="organ_filter_situations",
+        )
+
+    filtered_df = apply_organ_dashboard_filters(
+        df,
+        search_text=search_text,
+        document_types=selected_document_types,
+        years=selected_years,
+        units=selected_units,
+        suppliers=selected_suppliers,
+        modalities=selected_modalities,
+        situations=selected_situations,
+    )
+
+    if filtered_df.empty:
+        ui_empty_state(
+            icon="🧭",
+            title="Sem resultados neste recorte",
+            message="Os filtros atuais removeram todos os registros do orgao. Ajuste os recortes para continuar.",
+            badges=["Limpe os filtros", "Revise a busca textual", "Amplie o conjunto de documentos"],
+        )
+        return
+
+    filter_summary_parts: list[str] = []
+    if search_text.strip():
+        filter_summary_parts.append(f"Texto: {search_text.strip()}")
+    if selected_document_types:
+        filter_summary_parts.append(f"Tipos: {len(selected_document_types)}")
+    if selected_years:
+        filter_summary_parts.append(f"Anos: {len(selected_years)}")
+    if selected_units:
+        filter_summary_parts.append(f"Unidades: {len(selected_units)}")
+    if selected_suppliers:
+        filter_summary_parts.append(f"Fornecedores: {len(selected_suppliers)}")
+    if selected_modalities:
+        filter_summary_parts.append(f"Modalidades: {len(selected_modalities)}")
+    if selected_situations:
+        filter_summary_parts.append(f"Situacoes: {len(selected_situations)}")
+    filter_summary = " | ".join(filter_summary_parts) if filter_summary_parts else "Sem filtros ativos no modulo de orgao."
+
+    total_records = len(filtered_df)
+    total_value = filtered_df["valor_global"].sum()
+    supplier_count = (
+        filtered_df["fornecedor_nome"]
+        .replace(["Nao informado", "Nao se aplica"], pd.NA)
+        .dropna()
+        .nunique()
+    )
+    unit_count = filtered_df["unidade_nome"].nunique()
+    years_covered = filtered_df["ano"].dropna().nunique()
+
+    metric_col_1, metric_col_2, metric_col_3, metric_col_4, metric_col_5 = st.columns(5)
+    with metric_col_1:
+        ui_metric_card("Registros", format_integer(total_records), icon="📄", delta="Base consolidada")
+    with metric_col_2:
+        ui_metric_card("Valor total", format_currency(total_value), icon="💰", delta="Soma do recorte")
+    with metric_col_3:
+        ui_metric_card("Fornecedores", format_integer(supplier_count), icon="🏢", delta="Contratos com fornecedor")
+    with metric_col_4:
+        ui_metric_card("Unidades", format_integer(unit_count), icon="🏛️", delta="Estrutura ativa")
+    with metric_col_5:
+        ui_metric_card("Anos cobertos", format_integer(years_covered), icon="🗓️", delta="Faixa visivel")
+
+    contracts_df = filtered_df[filtered_df["document_type"].eq("contrato")].copy()
+    edital_df = filtered_df[filtered_df["document_type"].eq("edital")].copy()
+    ata_df = filtered_df[filtered_df["document_type"].eq("ata")].copy()
+
+    tab_1, tab_2, tab_3, tab_4, tab_5, tab_6 = st.tabs(
+        [
+            "Visao geral",
+            "Contratos anuais",
+            "Compras/Licitacoes",
+            "Atas",
+            "Base consolidada",
+            "Exportacao",
+        ]
+    )
+
+    with tab_1:
+        overview_col_1, overview_col_2 = st.columns([1, 1.2])
+        with overview_col_1:
+            chart_wrapper(
+                build_document_mix_chart(filtered_df),
+                "Composicao por tipo de documento",
+                "Leitura imediata do mix entre contratos/empenhos, compras/licitações e atas.",
+                icon="🧩",
+            )
+        with overview_col_2:
+            chart_wrapper(
+                build_yearly_chart(filtered_df),
+                "Leitura anual consolidada",
+                "Volume e valor total do panorama do orgao ao longo da faixa anual consultada.",
+                icon="📆",
+            )
+
+        overview_col_3, overview_col_4 = st.columns(2)
+        with overview_col_3:
+            chart_wrapper(
+                build_top_suppliers_chart(filtered_df),
+                "Top fornecedores contratados",
+                "Ranking financeiro dos fornecedores com contratos vinculados ao orgao.",
+                icon="🏢",
+            )
+        with overview_col_4:
+            chart_wrapper(
+                build_top_units_chart(filtered_df),
+                "Top unidades e UFs",
+                "Leitura operacional das unidades administrativas mais ativas no recorte.",
+                icon="📍",
+            )
+
+    with tab_2:
+        if contracts_df.empty:
+            ui_empty_state(
+                icon="📑",
+                title="Sem contratos ou empenhos neste recorte",
+                message="A faixa anual e os filtros atuais nao retornaram contratos/empenhos do orgao.",
+                badges=["Ajuste os anos", "Limpe filtros", "Revise o CNPJ do orgao"],
+            )
+        else:
+            contracts_col_1, contracts_col_2 = st.columns([1.2, 1])
+            with contracts_col_1:
+                chart_wrapper(
+                    build_yearly_chart(contracts_df),
+                    "Contratos por ano",
+                    "Quantidade e valor anual de contratos/empenhos associados ao orgao.",
+                    icon="📈",
+                )
+            with contracts_col_2:
+                chart_wrapper(
+                    build_top_suppliers_chart(contracts_df),
+                    "Fornecedores mais relevantes",
+                    "Leitura concentrada dos maiores fornecedores do orgao no recorte.",
+                    icon="🤝",
+                )
+
+            top_objects_df = build_top_objects_summary(contracts_df, limit=20)
+            if not top_objects_df.empty:
+                top_objects_df["valor_total"] = top_objects_df["valor_total"].apply(format_currency)
+                section_header(
+                    "Objetos mais recorrentes",
+                    "Agrupamento operacional dos principais objetos publicados pelo orgao nos contratos/empenhos.",
+                    icon="🧾",
+                )
+                st.dataframe(
+                    top_objects_df.rename(
+                        columns={
+                            "objeto_grupo": "Objeto",
+                            "quantidade": "Qtd. registros",
+                            "valor_total": "Valor total",
+                        }
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+    with tab_3:
+        if edital_df.empty:
+            ui_empty_state(
+                icon="🛒",
+                title="Sem compras/licitações neste recorte",
+                message="Nao ha registros de edital para a faixa anual e filtros selecionados.",
+                badges=["Revise os anos", "Troque a modalidade", "Amplie a busca textual"],
+            )
+        else:
+            procurement_col_1, procurement_col_2 = st.columns(2)
+            with procurement_col_1:
+                chart_wrapper(
+                    build_modality_chart(edital_df),
+                    "Distribuicao por modalidade",
+                    "Como as compras/licitações do orgao se distribuem por modalidade publicada.",
+                    icon="📦",
+                )
+            with procurement_col_2:
+                chart_wrapper(
+                    build_status_chart(edital_df),
+                    "Situacoes das compras/licitações",
+                    "Status publicados no portal para editais e compras do recorte.",
+                    icon="📌",
+                )
+
+            procurement_table = edital_df[
+                [
+                    "numero_controle_pncp",
+                    "titulo",
+                    "objeto",
+                    "unidade_nome",
+                    "modalidade_licitacao_nome",
+                    "situacao_nome",
+                    "valor_global",
+                    "link_pncp",
+                ]
+            ].copy()
+            procurement_table["valor_global"] = procurement_table["valor_global"].apply(format_currency)
+
+            section_header(
+                "Base de compras/licitações",
+                "Tabela detalhada para leitura do objeto, unidade administrativa e modalidade.",
+                icon="🔎",
+            )
+            st.dataframe(
+                procurement_table.rename(
+                    columns={
+                        "numero_controle_pncp": "Numero PNCP",
+                        "titulo": "Titulo",
+                        "objeto": "Objeto",
+                        "unidade_nome": "Unidade",
+                        "modalidade_licitacao_nome": "Modalidade",
+                        "situacao_nome": "Situacao",
+                        "valor_global": "Valor global",
+                        "link_pncp": "Link PNCP",
+                    }
+                ),
+                column_config={
+                    "Link PNCP": st.column_config.LinkColumn(
+                        "Link PNCP",
+                        help="Abre o detalhe da compra/licitação no portal",
+                        display_text="abrir no portal",
+                    )
+                },
+                use_container_width=True,
+                hide_index=True,
+                height=560,
+            )
+
+    with tab_4:
+        if ata_df.empty:
+            ui_empty_state(
+                icon="🗂️",
+                title="Sem atas neste recorte",
+                message="Nao ha atas publicadas para o orgao dentro da faixa anual informada.",
+                badges=["Revise o intervalo", "Verifique o portal", "Mantenha o recorte"],
+            )
+        else:
+            ata_col_1, ata_col_2 = st.columns([1.2, 1])
+            with ata_col_1:
+                chart_wrapper(
+                    build_yearly_chart(ata_df),
+                    "Atas por ano",
+                    "Leitura anual das atas vinculadas ao orgao no recorte consultado.",
+                    icon="📅",
+                )
+            with ata_col_2:
+                chart_wrapper(
+                    build_top_units_chart(ata_df),
+                    "Unidades com atas",
+                    "Unidades administrativas e UFs com maior concentracao de atas.",
+                    icon="📍",
+                )
+
+            ata_table = ata_df[
+                [
+                    "numero_controle_pncp",
+                    "titulo",
+                    "objeto",
+                    "unidade_nome",
+                    "situacao_nome",
+                    "valor_global",
+                    "link_pncp",
+                ]
+            ].copy()
+            ata_table["valor_global"] = ata_table["valor_global"].apply(format_currency)
+            section_header(
+                "Tabela de atas",
+                "Leitura operacional das atas para conferencia rapida no portal.",
+                icon="📋",
+            )
+            st.dataframe(
+                ata_table.rename(
+                    columns={
+                        "numero_controle_pncp": "Numero PNCP",
+                        "titulo": "Titulo",
+                        "objeto": "Objeto",
+                        "unidade_nome": "Unidade",
+                        "situacao_nome": "Situacao",
+                        "valor_global": "Valor global",
+                        "link_pncp": "Link PNCP",
+                    }
+                ),
+                column_config={
+                    "Link PNCP": st.column_config.LinkColumn(
+                        "Link PNCP",
+                        help="Abre o detalhe da ata no portal",
+                        display_text="abrir no portal",
+                    )
+                },
+                use_container_width=True,
+                hide_index=True,
+                height=560,
+            )
+
+    with tab_5:
+        section_header(
+            "Base consolidada do orgao",
+            "Tabela paginada com tipo de documento, fornecedor, unidade, ano e abertura direta no portal.",
+            icon="🗃️",
+        )
+
+        consolidated_df = filtered_df[
+            [
+                "document_type_label",
+                "numero_controle_pncp",
+                "titulo",
+                "objeto",
+                "fornecedor_nome",
+                "orgao_nome",
+                "unidade_nome",
+                "modalidade_licitacao_nome",
+                "situacao_nome",
+                "ano",
+                "valor_global",
+                "link_pncp",
+            ]
+        ].copy()
+        consolidated_df["ano"] = consolidated_df["ano"].astype("Int64").astype(str)
+        consolidated_df["valor_global"] = consolidated_df["valor_global"].apply(format_currency)
+        paged_consolidated_df = paginated_table(consolidated_df, key="organ_documents_table", rows_per_page=25)
+        st.dataframe(
+            paged_consolidated_df.rename(
+                columns={
+                    "document_type_label": "Tipo de documento",
+                    "numero_controle_pncp": "Numero PNCP",
+                    "titulo": "Titulo",
+                    "objeto": "Objeto",
+                    "fornecedor_nome": "Fornecedor",
+                    "orgao_nome": "Orgao",
+                    "unidade_nome": "Unidade",
+                    "modalidade_licitacao_nome": "Modalidade",
+                    "situacao_nome": "Situacao",
+                    "ano": "Ano",
+                    "valor_global": "Valor global",
+                    "link_pncp": "Link PNCP",
+                }
+            ),
+            column_config={
+                "Link PNCP": st.column_config.LinkColumn(
+                    "Link PNCP",
+                    help="Abre o detalhe do documento no portal",
+                    display_text="abrir no portal",
+                )
+            },
+            use_container_width=True,
+            hide_index=True,
+            height=620,
+        )
+
+    with tab_6:
+        section_header(
+            "Exportar base consolidada",
+            "Baixe CSV, Excel e PDF do panorama do orgao com faixa anual, tipo de documento, unidade e fornecedor.",
+            icon="⬇️",
+        )
+
+        export_meta = {
+            **meta,
+            "fetched_at": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        }
+        export_col_1, export_col_2 = st.columns([1.2, 1])
+        with export_col_1:
+            export_format = st.selectbox(
+                "Formato do relatorio",
+                ["PDF Executivo", "PDF Completo", "Excel", "CSV"],
+                key="organ_export_format",
+            )
+        with export_col_2:
+            include_charts = st.checkbox(
+                "Incluir graficos no PDF",
+                value=True,
+                key="organ_export_include_charts",
+                help="Quando desmarcado, o PDF fica mais leve e rapido para gerar.",
+            )
+
+        if st.button("Preparar pacote de exportacao", use_container_width=True, key="organ_prepare_export_button"):
+            with st.spinner("Gerando arquivo..."):
+                try:
+                    payload, filename, mime_type, label = prepare_export_payload(
+                        filtered_df,
+                        export_meta,
+                        export_format=export_format,
+                        include_charts=include_charts,
+                        filter_summary=filter_summary,
+                    )
+                except Exception as exc:
+                    ui_alert("error", f"Nao foi possivel gerar o arquivo agora: {exc}")
+                else:
+                    st.session_state["prepared_export_organ"] = {
+                        "payload": payload,
+                        "filename": filename,
+                        "mime_type": mime_type,
+                        "label": label,
+                    }
+                    ui_alert("success", f"Arquivo preparado com sucesso: {filename}")
+
+        prepared_export = st.session_state.get("prepared_export_organ")
+        if prepared_export:
+            st.download_button(
+                prepared_export["label"],
+                data=prepared_export["payload"],
+                file_name=prepared_export["filename"],
+                mime=prepared_export["mime_type"],
+                use_container_width=True,
+            )
+
+        quick_export_col_1, quick_export_col_2 = st.columns(2)
+        with quick_export_col_1:
+            st.download_button(
+                "Baixar CSV rapido",
+                data=dataframe_to_csv_bytes(filtered_df),
+                file_name=f"pncp_orgao_{meta.get('cnpj', '')}_{meta.get('start_year', '-')}_{meta.get('end_year', '-')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        with quick_export_col_2:
+            st.download_button(
+                "Baixar Excel rapido",
+                data=build_excel_report_bytes(filtered_df, export_meta, filter_summary),
+                file_name=f"pncp_orgao_{meta.get('cnpj', '')}_{meta.get('start_year', '-')}_{meta.get('end_year', '-')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+
+        section_header("Links uteis", "Atalhos para conferencia direta do orgao no portal e documentacao publica.", icon="🔗")
+        st.markdown(
+            f"""
+            - [Abrir busca publica do orgao no portal]({APP_BASE_URL}/buscar/todos?q={meta.get('cnpj', '')}&pagina=1)
+            - [Listagem publica do orgao no indice]({APP_BASE_URL}/buscar/todos?q={meta.get('cnpj', '')}&pagina=1)
+            - [Swagger da API de consulta do PNCP](https://pncp.gov.br/api/consulta/swagger-ui/index.html)
+            """
+        )
+
+    footer_block(
+        repo_url=REPO_URL,
+        timestamp=meta.get("fetched_at", "-"),
+    )
+
+
+def render_initial_screen(query_scope: str) -> None:
+    if query_scope == "organ":
+        ui_empty_state(
+            icon="🏛️",
+            title="Pronto para consultar o orgao publico",
+            message="Informe o CNPJ do orgao, escolha a faixa de anos e navegue pelo panorama de contratos, compras/licitações e atas.",
+            badges=["CNPJ do orgao", "Faixa anual obrigatoria", "Panorama consolidado"],
+        )
+    else:
+        ui_empty_state(
+            icon="🔎",
+            title="Pronto para consultar o fornecedor",
+            message="Informe o CNPJ no menu lateral, execute a busca e navegue por metricas, series temporais, base completa e exportacoes.",
+            badges=["Busca por CNPJ", "Graficos interativos", "Exportacao imediata"],
+        )
 
     info_col_1, info_col_2 = st.columns(2)
     with info_col_1:
-        section_header(
-            "O que este painel entrega",
-            "Uma superficie de trabalho orientada a leitura operacional, nao so uma vitrine de dados.",
-            icon="🧩",
-        )
-        st.markdown(
-            """
-            <div class="info-card">
-                <p class="section-copy">
-                    Busca por CNPJ, paginacao automatica, validacao do documento, visao executiva,
-                    recortes por orgao/ano/situacao, base clicavel e exportacao.
-                </p>
-                <div class="pill-row">
-                    <span class="pill">Busca profissional</span>
-                    <span class="pill">Graficos interativos</span>
-                    <span class="pill">Exportacao imediata</span>
+        if query_scope == "organ":
+            section_header(
+                "O que este modulo entrega",
+                "Uma leitura anual do orgao com separacao entre contratos, compras/licitações e atas.",
+                icon="🧩",
+            )
+            st.markdown(
+                """
+                <div class="info-card">
+                    <p class="section-copy">
+                        Consulta por CNPJ exato do orgao, faixa anual obrigatoria, panorama consolidado por tipo
+                        de documento, filtros por objeto/unidade/fornecedor e exportacao pronta para compartilhamento.
+                    </p>
+                    <div class="pill-row">
+                        <span class="pill">Contratos anuais</span>
+                        <span class="pill">Compras e atas</span>
+                        <span class="pill">Base consolidada</span>
+                    </div>
                 </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            section_header(
+                "O que este painel entrega",
+                "Uma superficie de trabalho orientada a leitura operacional, nao so uma vitrine de dados.",
+                icon="🧩",
+            )
+            st.markdown(
+                """
+                <div class="info-card">
+                    <p class="section-copy">
+                        Busca por CNPJ, paginacao automatica, validacao do documento, visao executiva,
+                        recortes por orgao/ano/situacao, base clicavel e exportacao.
+                    </p>
+                    <div class="pill-row">
+                        <span class="pill">Busca profissional</span>
+                        <span class="pill">Graficos interativos</span>
+                        <span class="pill">Exportacao imediata</span>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
     with info_col_2:
-        section_header(
-            "Fluxo recomendado",
-            "Passos curtos para chegar da consulta bruta a uma base pronta para compartilhar.",
-            icon="🧭",
-        )
-        st.markdown(
-            """
-            <div class="info-card">
-                <p class="section-copy">
-                    1. Informe o CNPJ do fornecedor. 2. Defina periodo, se quiser um recorte.
-                    3. Execute a busca. 4. Refine os filtros dinamicos. 5. Exporte a base final.
-                </p>
-                <div class="pill-row">
-                    <span class="pill">CNPJ com ou sem mascara</span>
-                    <span class="pill">Periodo opcional</span>
-                    <span class="pill">Base clicavel no portal</span>
+        if query_scope == "organ":
+            section_header(
+                "Fluxo recomendado",
+                "Passos curtos para sair do CNPJ do orgao e chegar a uma leitura anual filtravel.",
+                icon="🧭",
+            )
+            st.markdown(
+                """
+                <div class="info-card">
+                    <p class="section-copy">
+                        1. Informe o CNPJ do orgao. 2. Escolha ano inicial e final.
+                        3. Execute a busca. 4. Filtre por objeto, documento, unidade ou fornecedor.
+                        5. Exporte a base consolidada.
+                    </p>
+                    <div class="pill-row">
+                        <span class="pill">Faixa de ate 5 anos</span>
+                        <span class="pill">Filtro por objeto</span>
+                        <span class="pill">Exportacao executiva</span>
+                    </div>
                 </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            section_header(
+                "Fluxo recomendado",
+                "Passos curtos para chegar da consulta bruta a uma base pronta para compartilhar.",
+                icon="🧭",
+            )
+            st.markdown(
+                """
+                <div class="info-card">
+                    <p class="section-copy">
+                        1. Informe o CNPJ do fornecedor. 2. Defina periodo, se quiser um recorte.
+                        3. Execute a busca. 4. Refine os filtros dinamicos. 5. Exporte a base final.
+                    </p>
+                    <div class="pill-row">
+                        <span class="pill">CNPJ com ou sem mascara</span>
+                        <span class="pill">Periodo opcional</span>
+                        <span class="pill">Base clicavel no portal</span>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
 
 def main() -> None:
     load_css()
     initialize_state()
-    render_masthead()
+    sidebar_state = render_sidebar()
+    query_scope = sidebar_state["query_scope"]
+    render_masthead(query_scope)
 
-    submitted, cnpj_input, start_date, end_date = render_sidebar()
-
-    if submitted:
+    if sidebar_state["submitted"]:
         loading_placeholder = st.empty()
         with loading_placeholder.container():
             render_loading_skeleton()
         try:
-            run_search(cnpj_input, start_date, end_date)
+            if query_scope == "organ":
+                run_organ_search(
+                    sidebar_state["cnpj_input"],
+                    int(sidebar_state["start_year"]),
+                    int(sidebar_state["end_year"]),
+                )
+            else:
+                run_supplier_search(
+                    sidebar_state["cnpj_input"],
+                    sidebar_state["start_date"],
+                    sidebar_state["end_date"],
+                )
         except PncpApiError as exc:
             loading_placeholder.empty()
             ui_alert("error", str(exc))
             st.stop()
         loading_placeholder.empty()
 
-    contracts_df = st.session_state.get("contracts_df")
-    query_meta = st.session_state.get("query_meta", {})
+    if query_scope == "organ":
+        records_df = st.session_state.get("organ_documents_df")
+        query_meta = st.session_state.get("organ_query_meta", {})
+    else:
+        records_df = st.session_state.get("supplier_contracts_df")
+        query_meta = st.session_state.get("supplier_query_meta", {})
 
-    if contracts_df is None:
-        render_initial_screen()
+    if records_df is None:
+        render_initial_screen(query_scope)
         footer_block(repo_url=REPO_URL, timestamp=datetime.now().strftime("%d/%m/%Y %H:%M"))
         return
 
-    if contracts_df.empty:
-        ui_alert("warning", "Nenhum contrato foi encontrado para o CNPJ informado.")
+    if records_df.empty:
+        if query_scope == "organ":
+            ui_alert("warning", "Nenhum documento foi encontrado para o orgao e a faixa anual informados.")
+        else:
+            ui_alert("warning", "Nenhum contrato foi encontrado para o CNPJ informado.")
         footer_block(repo_url=REPO_URL, timestamp=datetime.now().strftime("%d/%m/%Y %H:%M"))
         return
 
-    render_dashboard(contracts_df, query_meta)
+    if query_scope == "organ":
+        render_organ_dashboard(records_df, query_meta)
+    else:
+        render_dashboard(records_df, query_meta)
 
 
 if __name__ == "__main__":
