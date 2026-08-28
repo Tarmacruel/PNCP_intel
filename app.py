@@ -146,7 +146,11 @@ def load_css() -> None:
         }
 
         [data-testid="stSidebar"] [data-baseweb="input"] input,
-        [data-testid="stSidebar"] input,
+        [data-testid="stSidebar"] input[type="text"],
+        [data-testid="stSidebar"] input[type="search"],
+        [data-testid="stSidebar"] input[type="number"],
+        [data-testid="stSidebar"] input[type="email"],
+        [data-testid="stSidebar"] input[role="combobox"],
         [data-testid="stSidebar"] textarea {
             color: var(--sidebar-control-text) !important;
             background: rgba(255,255,255,.95) !important;
@@ -729,9 +733,12 @@ def load_css() -> None:
         [data-testid="stSidebar"] h5,
         [data-testid="stSidebar"] h6,
         [data-testid="stSidebar"] strong,
-        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+        [data-testid="stSidebar"] [data-testid="stWidgetLabel"],
+        [data-testid="stSidebar"] label[data-testid="stWidgetLabel"],
         [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
         [data-testid="stSidebar"] [data-testid="stWidgetLabel"] label,
+        [data-testid="stSidebar"] [data-testid="stRadioOption"],
+        [data-testid="stSidebar"] [data-testid="stRadioOption"] p,
         [data-testid="stSidebar"] [data-testid="stRadio"] label,
         [data-testid="stSidebar"] [data-testid="stRadio"] p,
         [data-testid="stSidebar"] [role="radiogroup"] label,
@@ -745,6 +752,11 @@ def load_css() -> None:
         }
 
         [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p,
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] li,
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] li::marker,
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] ol,
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] ul,
         [data-testid="stSidebar"] small {
             color: var(--sidebar-muted) !important;
             opacity: 1 !important;
@@ -765,7 +777,7 @@ def load_css() -> None:
 
         [data-testid="stSidebar"] input::placeholder,
         [data-testid="stSidebar"] textarea::placeholder {
-            color: #60798D !important;
+            color: #586F82 !important;
             opacity: 1 !important;
         }
 
