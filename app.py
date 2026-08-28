@@ -136,20 +136,19 @@ def load_css() -> None:
         .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
 
         [data-testid="stSidebar"] {
+            --sidebar-text: #F8FBFF;
+            --sidebar-muted: #D5E2EC;
+            --sidebar-link: #BFE7FA;
+            --sidebar-control-text: #11283B;
             background:
-                linear-gradient(180deg, rgba(11,36,55,.985) 0%, rgba(18,52,77,.985) 65%, rgba(34,69,95,.98) 100%);
+                linear-gradient(180deg, #102E45 0%, #163D59 65%, #21526F 100%);
             border-right: 1px solid rgba(255, 255, 255, 0.08);
         }
 
-        [data-testid="stSidebar"] * { color: #f8fbff; }
-        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
-        [data-testid="stSidebar"] label,
-        [data-testid="stSidebar"] span,
-        [data-testid="stSidebar"] div { color: inherit; }
         [data-testid="stSidebar"] [data-baseweb="input"] input,
         [data-testid="stSidebar"] input,
         [data-testid="stSidebar"] textarea {
-            color: var(--text-primary) !important;
+            color: var(--sidebar-control-text) !important;
             background: rgba(255,255,255,.95) !important;
         }
 
@@ -718,7 +717,85 @@ def load_css() -> None:
         [data-testid="stSidebar"] [data-testid="stWidgetLabel"] label,
         [data-testid="stSidebar"] .stMultiSelect label,
         [data-testid="stSidebar"] .stSelectbox label {
-            color: #f8fbff !important;
+            color: var(--sidebar-text) !important;
+        }
+
+        /* Sidebar: Streamlit 1.62 gives several controls explicit foregrounds.
+           Keep every navigation label readable instead of relying on inheritance. */
+        [data-testid="stSidebar"] h1,
+        [data-testid="stSidebar"] h2,
+        [data-testid="stSidebar"] h3,
+        [data-testid="stSidebar"] h4,
+        [data-testid="stSidebar"] h5,
+        [data-testid="stSidebar"] h6,
+        [data-testid="stSidebar"] strong,
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+        [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
+        [data-testid="stSidebar"] [data-testid="stWidgetLabel"] label,
+        [data-testid="stSidebar"] [data-testid="stRadio"] label,
+        [data-testid="stSidebar"] [data-testid="stRadio"] p,
+        [data-testid="stSidebar"] [role="radiogroup"] label,
+        [data-testid="stSidebar"] [role="radiogroup"] p,
+        [data-testid="stSidebar"] [data-testid="stCheckbox"] label,
+        [data-testid="stSidebar"] [data-testid="stCheckbox"] p,
+        [data-testid="stSidebar"] [data-testid="stToggle"] label,
+        [data-testid="stSidebar"] [data-testid="stToggle"] p {
+            color: var(--sidebar-text) !important;
+            opacity: 1 !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p,
+        [data-testid="stSidebar"] small {
+            color: var(--sidebar-muted) !important;
+            opacity: 1 !important;
+        }
+
+        [data-testid="stSidebar"] a {
+            color: var(--sidebar-link) !important;
+            text-decoration-color: rgba(191,231,250,.72) !important;
+        }
+
+        [data-testid="stSidebar"] code {
+            color: var(--sidebar-text) !important;
+            background: rgba(255,255,255,.15) !important;
+            border: 1px solid rgba(255,255,255,.18);
+            border-radius: 6px;
+            padding: .1rem .32rem;
+        }
+
+        [data-testid="stSidebar"] input::placeholder,
+        [data-testid="stSidebar"] textarea::placeholder {
+            color: #60798D !important;
+            opacity: 1 !important;
+        }
+
+        [data-testid="stSidebar"] input[type="radio"],
+        [data-testid="stSidebar"] input[type="checkbox"] {
+            accent-color: #6EC6E8;
+        }
+
+        [data-testid="stSidebar"] .stButton > button,
+        [data-testid="stSidebar"] .stFormSubmitButton > button {
+            color: #FFFFFF !important;
+        }
+
+        [data-testid="stSidebar"] .stButton > button p,
+        [data-testid="stSidebar"] .stFormSubmitButton > button p {
+            color: #FFFFFF !important;
+        }
+
+        [data-testid="stSidebar"] .stButton > button[kind="secondary"] {
+            background: rgba(255,255,255,.12);
+            border-color: rgba(255,255,255,.26);
+            color: var(--sidebar-text);
+        }
+
+        [data-testid="stSidebar"] .stButton > button[kind="secondary"] p {
+            color: var(--sidebar-text) !important;
+        }
+
+        [data-testid="stSidebar"] hr {
+            border-color: rgba(255,255,255,.16) !important;
         }
 
         .stTextInput input:focus,
