@@ -1,0 +1,16 @@
+[server]
+# O Streamlit Community Cloud nao precisa observar alteracoes locais em tempo real.
+# Desativar o watcher evita a falha de inicializacao por limite de instancias
+# inotify compartilhado no ambiente de hospedagem.
+fileWatcherType = "none"
+
+[theme]
+base = "light"
+primaryColor = "#0F5B78"
+backgroundColor = "#F6F8FB"
+secondaryBackgroundColor = "#EAF1F6"
+textColor = "#11283B"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false

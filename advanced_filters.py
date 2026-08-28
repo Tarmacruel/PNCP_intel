@@ -230,11 +230,11 @@ def apply_advanced_filters(df: pd.DataFrame) -> AdvancedFilters:
 
         action_col_1, action_col_2 = st.columns(2)
         with action_col_1:
-            if st.button("Limpar filtros", use_container_width=True, key=_state_key("reset_button")):
+            if st.button("Limpar filtros", type="secondary", use_container_width=True, key=_state_key("reset_button")):
                 _reset_filter_state()
                 st.rerun()
         with action_col_2:
-            if st.button("Top 50", use_container_width=True, key=_state_key("top50_button")):
+            if st.button("Top 50", type="secondary", use_container_width=True, key=_state_key("top50_button")):
                 st.session_state[_state_key("quick_preset")] = "Maiores contratos"
                 st.rerun()
 
@@ -272,15 +272,15 @@ def apply_advanced_filters(df: pd.DataFrame) -> AdvancedFilters:
 
         quick_col_1, quick_col_2 = st.columns(2)
         with quick_col_1:
-            if st.button("Recentes", use_container_width=True, key=_state_key("recent_button")):
+            if st.button("Recentes", type="secondary", use_container_width=True, key=_state_key("recent_button")):
                 st.session_state[_state_key("quick_preset")] = "Mais recentes"
                 st.rerun()
         with quick_col_2:
-            if st.button("12 meses", use_container_width=True, key=_state_key("12m_button")):
+            if st.button("12 meses", type="secondary", use_container_width=True, key=_state_key("12m_button")):
                 st.session_state[_state_key("quick_preset")] = "Ultimos 12 meses"
                 st.rerun()
 
-        if st.button("Sem preset", use_container_width=True, key=_state_key("clear_preset_button")):
+        if st.button("Sem preset", type="secondary", use_container_width=True, key=_state_key("clear_preset_button")):
             st.session_state[_state_key("quick_preset")] = ""
             st.rerun()
 

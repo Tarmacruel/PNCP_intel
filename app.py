@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 import time
 from datetime import date, datetime
+from html import escape as escape_html
 from io import BytesIO
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.worksheet.table import Table as ExcelTable, TableStyleInfo
+from openpyxl.utils import get_column_letter
 from advanced_charts import (
     build_boxplot_top_orgaos,
     build_bubble_organs,
@@ -22,11 +29,12 @@ from advanced_charts import (
     build_treemap_hierarchy,
 )
 from advanced_filters import apply_advanced_filters
-from pdf_generator import pdf_generator
+from pdf_generator import ChartSection, pdf_generator
 
 from components import (
     alert as ui_alert,
     chart_wrapper,
+    context_strip,
     empty_state as ui_empty_state,
     footer_block,
     metric_card as ui_metric_card,
@@ -45,6 +53,7 @@ st.set_page_config(
 
 
 APP_TITLE = "PNCP Intelligence"
+APP_VERSION = "2.0.0"
 SEARCH_API_URL = "https://pncp.gov.br/api/search/"
 DETAIL_API_BASE = "https://pncp.gov.br/api/pncp/v1/orgaos"
 CONSULTA_CONTRATOS_API_URL = "https://pncp.gov.br/api/consulta/v1/contratos"
@@ -70,6 +79,15 @@ COLOR_GRID = "rgba(22, 51, 72, 0.10)"
 COLOR_AXIS = "rgba(22, 51, 72, 0.18)"
 COLOR_SURFACE = "#FFFFFF"
 EXCEL_ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x08\x0B-\x0C\x0E-\x1F]")
+EXCEL_FORMULA_PREFIXES = ("=", "+", "-", "@")
+REPORT_TIMEZONE = ZoneInfo("America/Sao_Paulo")
+EXPORT_DATE_COLUMNS = {
+    "data_assinatura",
+    "data_publicacao_pncp",
+    "data_atualizacao_pncp",
+    "data_referencia",
+    "mes_ano",
+}
 
 
 class PncpApiError(RuntimeError):
@@ -232,6 +250,60 @@ def load_css() -> None:
             box-shadow: var(--shadow-sm);
             padding: 1rem 1.1rem;
             animation: rise .34s ease-out;
+        }
+
+        .context-strip {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1.2rem;
+            margin: 1.15rem 0 1rem;
+            padding: 1rem 0;
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .context-strip h2 {
+            margin: .08rem 0 .18rem;
+            color: var(--text-primary);
+            font-size: 1.08rem;
+            letter-spacing: -.02em;
+        }
+
+        .context-strip p {
+            margin: 0;
+            color: var(--text-secondary);
+            font-size: .88rem;
+            line-height: 1.5;
+        }
+
+        .context-kicker {
+            color: var(--secondary) !important;
+            font-size: .7rem !important;
+            font-weight: 800;
+            letter-spacing: .1em;
+            text-transform: uppercase;
+        }
+
+        .context-items {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+            gap: .45rem;
+        }
+
+        .context-item {
+            display: inline-flex;
+            align-items: center;
+            min-height: 2rem;
+            padding: .42rem .66rem;
+            border: 1px solid rgba(18,52,77,.12);
+            border-radius: 999px;
+            background: rgba(18,52,77,.045);
+            color: var(--primary);
+            font-size: .78rem;
+            font-weight: 750;
+            white-space: nowrap;
         }
 
         .section-title {
@@ -538,11 +610,11 @@ def load_css() -> None:
             width: 100%;
             border: 0;
             border-radius: 14px;
-            background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+            background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
             color: white;
             font-weight: 800;
             padding: .74rem 1rem;
-            box-shadow: 0 14px 30px rgba(193,123,45,.24);
+            box-shadow: 0 14px 30px rgba(18,52,77,.22);
             transition: var(--transition);
         }
 
@@ -556,18 +628,48 @@ def load_css() -> None:
         .stButton > button:focus,
         .stDownloadButton > button:focus,
         .stFormSubmitButton > button:focus {
-            outline: none !important;
-            box-shadow: 0 0 0 4px rgba(193,123,45,.16), 0 14px 30px rgba(193,123,45,.24) !important;
+            outline: 3px solid rgba(15,91,120,.52) !important;
+            outline-offset: 2px !important;
+            box-shadow: 0 0 0 4px rgba(15,91,120,.14), 0 14px 30px rgba(18,52,77,.22) !important;
         }
 
         .stButton > button:hover,
         .stDownloadButton > button:hover,
         .stFormSubmitButton > button:hover {
             transform: translateY(-2px);
-            box-shadow: 0 18px 36px rgba(193,123,45,.3);
-            background: linear-gradient(135deg, #b76e20 0%, var(--accent) 100%);
+            box-shadow: 0 18px 36px rgba(18,52,77,.3);
+            background: linear-gradient(135deg, var(--primary-dark) 0%, var(--primary) 100%);
             color: white;
             border: 0;
+        }
+
+        .stButton > button[kind="secondary"] {
+            background: rgba(255,255,255,.92);
+            border: 1px solid rgba(18,52,77,.18);
+            box-shadow: none;
+            color: var(--primary);
+        }
+
+        .stButton > button[kind="secondary"] p {
+            color: var(--primary) !important;
+        }
+
+        .stButton > button[kind="secondary"]:hover {
+            background: rgba(18,52,77,.06);
+            border: 1px solid rgba(18,52,77,.28);
+            box-shadow: none;
+            color: var(--primary);
+            transform: none;
+        }
+
+        a:focus-visible,
+        button:focus-visible,
+        [role="tab"]:focus-visible,
+        input:focus-visible,
+        textarea:focus-visible,
+        [data-baseweb="select"] > div:focus-within {
+            outline: 3px solid rgba(15,91,120,.52) !important;
+            outline-offset: 2px;
         }
 
         .stTextInput input,
@@ -702,6 +804,26 @@ def load_css() -> None:
             div[data-testid="stDataFrame"] { border-radius: 18px; }
             .table-toolbar { gap: .35rem; }
             .ui-skeleton-grid { grid-template-columns: 1fr; }
+            .context-strip { align-items: flex-start; flex-direction: column; gap: .7rem; }
+            .context-items { justify-content: flex-start; }
+        }
+
+        @media (max-width: 480px) {
+            .block-container { padding-left: .85rem; padding-right: .85rem; }
+            .masthead { padding: 1.1rem .95rem; border-radius: 20px; }
+            .masthead h1 { font-size: 1.5rem; }
+            .metric-card { min-height: 126px; padding: .85rem; border-radius: 16px; }
+            .metric-label { font-size: .66rem; }
+            .context-item { font-size: .73rem; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: .01ms !important;
+                animation-iteration-count: 1 !important;
+                scroll-behavior: auto !important;
+                transition-duration: .01ms !important;
+            }
         }
         </style>
         """,
@@ -748,6 +870,12 @@ def format_integer(value: int | float | None) -> str:
     if value is None or pd.isna(value):
         return "0"
     return f"{int(value):,}".replace(",", ".")
+
+
+def escape_for_html(value: Any) -> str:
+    """Escape externally sourced values before inserting them into custom HTML."""
+
+    return escape_html(str(value))
 
 
 def extract_error_message(response: httpx.Response) -> str:
@@ -1162,6 +1290,20 @@ def normalize_organ_documents(
         ]
         df = df.drop(columns=[column for column in drop_columns if column in df.columns])
 
+    # O enriquecimento pode substituir a data de assinatura e o ano do índice.
+    # Recalcular as chaves temporais garante coerência entre filtros, séries e exportações.
+    df["data_assinatura"] = pd.to_datetime(df["data_assinatura"], errors="coerce")
+    df["ano"] = pd.to_numeric(df["ano"], errors="coerce").astype("Int64")
+    df = df[df["ano"].between(start_year, end_year, inclusive="both")].copy()
+    if df.empty:
+        return pd.DataFrame()
+    df["data_referencia"] = (
+        df["data_assinatura"]
+        .fillna(df["data_publicacao_pncp"])
+        .fillna(df["data_atualizacao_pncp"])
+    )
+    df["mes_ano"] = df["data_referencia"].dt.to_period("M").dt.to_timestamp()
+
     display_order = [
         "document_type",
         "document_type_label",
@@ -1340,13 +1482,15 @@ def render_filter_summary(
         if is_partial
         else f"Base recuperada: {format_integer(retrieved_records)} contratos"
     )
+    supplier_label = escape_for_html(supplier_name or "Fornecedor consultado")
+    cnpj_label = escape_for_html(format_cnpj_display(cnpj))
 
     st.markdown(
         f"""
         <div class="info-card">
-            <p class="section-title">{supplier_name or "Fornecedor consultado"}</p>
+            <p class="section-title">{supplier_label}</p>
             <p class="section-copy">
-                CNPJ {format_cnpj_display(cnpj)} | {format_integer(total_records)} contratos indexados no portal
+                CNPJ {cnpj_label} | {format_integer(total_records)} contratos indexados no portal
             </p>
             <div class="pill-row">
                 <span class="pill">Periodo: {period_label}</span>
@@ -1385,19 +1529,22 @@ def render_organ_filter_summary(
         if not is_partial
         else f"Base exata no recorte: {format_integer(exact_records)} de {format_integer(total_records)}"
     )
+    organ_label = escape_for_html(organ_name or "Orgao publico consultado")
+    cnpj_label = escape_for_html(format_cnpj_display(cnpj))
+    enrichment_label = escape_for_html(enrichment_status)
 
     st.markdown(
         f"""
         <div class="info-card">
-            <p class="section-title">{organ_name or "Orgao publico consultado"}</p>
+            <p class="section-title">{organ_label}</p>
             <p class="section-copy">
-                CNPJ {format_cnpj_display(cnpj)} | {format_integer(retrieved_records)} registros recuperados do indice
+                CNPJ {cnpj_label} | {format_integer(retrieved_records)} registros recuperados do indice
             </p>
             <div class="pill-row">
                 <span class="pill">{period_label}</span>
                 <span class="pill">{strategy_label}</span>
                 <span class="pill">{coverage_label}</span>
-                <span class="pill">{enrichment_status}</span>
+                <span class="pill">{enrichment_label}</span>
                 <span class="pill">{format_integer(total_records)} registros brutos na busca</span>
             </div>
         </div>
@@ -1922,85 +2069,240 @@ def prepare_export_payload(
     include_charts: bool,
     filter_summary: str,
 ) -> tuple[bytes, str, str, str]:
+    report_meta = build_report_context(df, meta, filter_summary)
     query_scope = meta.get("query_scope", "supplier")
-    if query_scope == "organ":
-        file_stem = f"pncp_orgao_{meta.get('cnpj', '')}_{meta.get('start_year', '-')}_{meta.get('end_year', '-')}"
-    else:
-        file_stem = f"pncp_contratos_{meta.get('cnpj', '')}"
+    scope_label = "orgao" if query_scope == "organ" else "fornecedor"
+    cnpj = re.sub(r"\D", "", str(meta.get("cnpj", ""))) or "sem_cnpj"
+    timestamp = report_meta["report_generated_file_stamp"]
+    report_id = report_meta["report_id"].lower()
+
+    file_suffixes = {
+        "CSV": "base",
+        "Excel": "analitico",
+        "PDF Executivo": "executivo",
+        "PDF Detalhado (amostra)": "detalhado",
+        # Mantem compatibilidade com uma selecao salva em sessoes anteriores.
+        "PDF Completo": "detalhado",
+    }
+    file_suffix = file_suffixes.get(export_format, "relatorio")
+    file_stem = f"pncp_{scope_label}_{cnpj}_{timestamp}_{file_suffix}_{report_id}"
 
     if export_format == "CSV":
         payload = dataframe_to_csv_bytes(df)
-        return payload, f"{file_stem}.csv", "text/csv", "Download CSV"
+        return payload, f"{file_stem}.csv", "text/csv; charset=utf-8", "Baixar CSV"
 
     if export_format == "Excel":
-        payload = build_excel_report_bytes(df, meta, filter_summary)
+        payload = build_excel_report_bytes(df, report_meta, filter_summary)
         return (
             payload,
             f"{file_stem}.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            "Download Excel",
+            "Baixar Excel",
         )
 
-    chart_payload = None
+    chart_payload: list[ChartSection] | None = None
     if include_charts:
         if query_scope == "organ":
             contracts_df = df[df["document_type"].eq("contrato")].copy()
             timeline_source = contracts_df if not contracts_df.empty else df
-            chart_payload = {
-                "top_orgs": build_top_suppliers_chart(df),
-                "timeline": build_yearly_chart(timeline_source),
-                "value_band": build_document_mix_chart(df),
-            }
+            chart_payload = [
+                ChartSection(
+                    "Principais fornecedores",
+                    "Concentração financeira por fornecedor nos contratos e empenhos do recorte.",
+                    build_top_suppliers_chart(contracts_df if not contracts_df.empty else df),
+                ),
+                ChartSection(
+                    "Evolução anual dos contratos",
+                    "Quantidade e valor anual dos contratos e empenhos associados ao órgão.",
+                    build_yearly_chart(timeline_source),
+                ),
+                ChartSection(
+                    "Composição dos documentos",
+                    "Distribuição dos registros entre contratos, compras/licitações e atas.",
+                    build_document_mix_chart(df),
+                ),
+            ]
         else:
-            chart_payload = {
-                "top_orgs": build_top_orgs_chart(df),
-                "timeline": build_timeline_chart(df),
-                "value_band": build_value_band_chart(df),
-            }
+            chart_payload = [
+                ChartSection(
+                    "Principais órgãos contratantes",
+                    "Concentração financeira por órgão contratante no recorte filtrado.",
+                    build_top_orgs_chart(df),
+                ),
+                ChartSection(
+                    "Evolução mensal",
+                    "Valor total e quantidade de contratos por mês de referência.",
+                    build_timeline_chart(df),
+                ),
+                ChartSection(
+                    "Distribuição por faixa de valor",
+                    "Concentração da carteira por banda de ticket contratual.",
+                    build_value_band_chart(df),
+                ),
+            ]
 
-    report_mode = "full" if export_format == "PDF Completo" else "executive"
+    report_mode = "detail" if export_format in {"PDF Detalhado (amostra)", "PDF Completo"} else "executive"
     payload = pdf_generator.generate_pdf(
         df,
-        meta=meta,
+        meta=report_meta,
         filter_summary=filter_summary,
         charts=chart_payload,
         report_mode=report_mode,
     )
-    return payload, f"{file_stem}.pdf", "application/pdf", "Download PDF"
+    label = "Baixar PDF detalhado" if report_mode == "detail" else "Baixar PDF executivo"
+    return payload, f"{file_stem}.pdf", "application/pdf", label
+
+
+def build_report_context(df: pd.DataFrame, meta: dict[str, Any], filter_summary: str) -> dict[str, Any]:
+    """Attach a reproducible identifier and provenance to every export format."""
+
+    generated_at = datetime.now(REPORT_TIMEZONE)
+    values = pd.to_numeric(df.get("valor_global", pd.Series(dtype="float64")), errors="coerce").fillna(0.0)
+    fingerprint_source = json.dumps(
+        {
+            "scope": meta.get("query_scope", "supplier"),
+            "cnpj": str(meta.get("cnpj", "")),
+            "records": len(df),
+            "value": round(float(values.sum()), 2),
+            "filters": filter_summary,
+            "generated_at": generated_at.isoformat(timespec="minutes"),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    report_id = hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()[:10].upper()
+    return {
+        **meta,
+        "report_id": report_id,
+        "report_generated_at": generated_at.strftime("%d/%m/%Y %H:%M BRT"),
+        "report_generated_file_stamp": generated_at.strftime("%Y%m%d-%H%M"),
+        "source_url": APP_BASE_URL,
+        "app_version": APP_VERSION,
+        "filter_summary": filter_summary,
+    }
 
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
 def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
+    export_df = prepare_dataframe_for_export(df)
+    return export_df.to_csv(index=False, sep=";", encoding="utf-8-sig", date_format="%Y-%m-%d").encode("utf-8-sig")
 
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
-def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        sanitize_dataframe_for_excel(df).to_excel(writer, index=False, sheet_name="Contratos")
-    return output.getvalue()
+def sanitize_spreadsheet_cell(value: Any) -> Any:
+    """Make external values safe for CSV/XLSX without changing numeric data."""
 
-
-def sanitize_excel_text(value: Any) -> Any:
+    if isinstance(value, (dict, list, tuple, set)):
+        try:
+            value = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            value = str(value)
     if not isinstance(value, str):
         return value
-    return EXCEL_ILLEGAL_CHARS_RE.sub("", value)
+    clean_value = EXCEL_ILLEGAL_CHARS_RE.sub("", value)
+    if clean_value.lstrip().startswith(EXCEL_FORMULA_PREFIXES):
+        return f"'{clean_value}"
+    return clean_value
 
 
-def sanitize_dataframe_for_excel(df: pd.DataFrame) -> pd.DataFrame:
-    sanitized_df = df.copy()
-    object_columns = sanitized_df.select_dtypes(include=["object", "string"]).columns
-    for column_name in object_columns:
-        sanitized_df[column_name] = sanitized_df[column_name].map(sanitize_excel_text)
-    return sanitized_df
+def prepare_dataframe_for_export(df: pd.DataFrame) -> pd.DataFrame:
+    export_df = df.copy()
+    for column_name in EXPORT_DATE_COLUMNS.intersection(export_df.columns):
+        parsed_dates = pd.to_datetime(export_df[column_name], errors="coerce")
+        if isinstance(parsed_dates.dtype, pd.DatetimeTZDtype):
+            parsed_dates = parsed_dates.dt.tz_localize(None)
+        export_df[column_name] = parsed_dates
+
+    text_columns = export_df.select_dtypes(include=["object", "string", "category"]).columns
+    for column_name in text_columns:
+        export_df[column_name] = export_df[column_name].map(sanitize_spreadsheet_cell)
+    return export_df
+
+
+def _write_export_title(worksheet, title: str, subtitle: str) -> None:  # noqa: ANN001
+    max_column = max(worksheet.max_column, 2)
+    worksheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max_column)
+    title_cell = worksheet.cell(1, 1, title)
+    title_cell.font = Font(name="Aptos Display", bold=True, size=16, color="FFFFFF")
+    title_cell.fill = PatternFill("solid", fgColor="12344D")
+    title_cell.alignment = Alignment(vertical="center")
+    worksheet.row_dimensions[1].height = 28
+    worksheet.merge_cells(start_row=2, start_column=1, end_row=2, end_column=max_column)
+    subtitle_cell = worksheet.cell(2, 1, subtitle)
+    subtitle_cell.font = Font(name="Aptos", italic=True, size=10, color="5D7185")
+    subtitle_cell.alignment = Alignment(vertical="center")
+    worksheet.row_dimensions[2].height = 22
+
+
+def _style_export_sheet(
+    worksheet,
+    *,
+    table_name: str,
+    header_row: int = 3,
+    freeze_panes: bool = True,
+) -> None:  # noqa: ANN001
+    if worksheet.max_row < header_row or worksheet.max_column == 0:
+        return
+
+    header_cells = list(worksheet[header_row])
+    header_names = [str(cell.value or "") for cell in header_cells]
+    header_fill = PatternFill("solid", fgColor="0F5B78")
+    for cell in header_cells:
+        cell.font = Font(name="Aptos", bold=True, color="FFFFFF")
+        cell.fill = header_fill
+        cell.alignment = Alignment(vertical="center", wrap_text=True)
+
+    if freeze_panes:
+        worksheet.freeze_panes = f"A{header_row + 1}"
+    worksheet.sheet_view.showGridLines = False
+
+    if worksheet.max_row > header_row:
+        table_ref = f"A{header_row}:{get_column_letter(worksheet.max_column)}{worksheet.max_row}"
+        table = ExcelTable(displayName=table_name, ref=table_ref)
+        table.tableStyleInfo = TableStyleInfo(
+            name="TableStyleMedium2",
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=True,
+            showColumnStripes=False,
+        )
+        worksheet.add_table(table)
+
+    currency_headers = {"valor_global", "valor_total", "valor_medio"}
+    for column_index, header_name in enumerate(header_names, start=1):
+        column_letter = get_column_letter(column_index)
+        sample_values = [
+            len(str(cell.value))
+            for cell in list(worksheet[column_letter])[header_row - 1 : min(worksheet.max_row, header_row + 200)]
+            if cell.value is not None
+        ]
+        worksheet.column_dimensions[column_letter].width = min(max(max(sample_values, default=10) + 2, 11), 52)
+        for cell in list(worksheet[column_letter])[header_row:]:
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+            if header_name in currency_headers and isinstance(cell.value, (int, float)):
+                cell.number_format = 'R$ #,##0.00'
+            elif header_name in EXPORT_DATE_COLUMNS and hasattr(cell.value, "strftime"):
+                cell.number_format = "DD/MM/YYYY"
+            elif header_name == "link_pncp" and cell.value:
+                cell.hyperlink = str(cell.value)
+                cell.style = "Hyperlink"
+
+
+def _column_description(column_name: str) -> str:
+    descriptions = {
+        "numero_controle_pncp": "Identificador público único do registro no PNCP.",
+        "valor_global": "Valor global publicado para o documento.",
+        "data_assinatura": "Data de assinatura informada pelo PNCP.",
+        "data_referencia": "Data usada nas análises quando há mais de uma data disponível.",
+        "link_pncp": "Link de conferência direta no portal público.",
+        "fornecedor_nome": "Fornecedor associado ao contrato, quando informado.",
+        "orgao_nome": "Órgão público responsável pela publicação.",
+        "document_type": "Tipo técnico do documento recuperado no índice.",
+    }
+    return descriptions.get(column_name, "Campo retornado pela API pública do PNCP.")
 
 
 def build_excel_report_bytes(df: pd.DataFrame, meta: dict[str, Any], filter_summary: str) -> bytes:
-    export_df = df.copy()
-    for column_name in ["data_assinatura", "data_publicacao_pncp", "data_atualizacao_pncp", "data_referencia", "mes_ano"]:
-        if column_name in export_df.columns:
-            export_df[column_name] = pd.to_datetime(export_df[column_name], errors="coerce").dt.strftime("%Y-%m-%d")
+    export_df = prepare_dataframe_for_export(df)
 
     query_scope = meta.get("query_scope", "supplier")
     if query_scope == "organ":
@@ -2053,15 +2355,47 @@ def build_excel_report_bytes(df: pd.DataFrame, meta: dict[str, Any], filter_summ
         export_sheet_name = "Contratos"
 
     summary_df = pd.DataFrame(summary_rows, columns=["Metrica", "Valor"])
-    summary_df = sanitize_dataframe_for_excel(summary_df)
-    ranking_df = sanitize_dataframe_for_excel(ranking_df)
-    export_df = sanitize_dataframe_for_excel(export_df)
+    metadata_df = pd.DataFrame(
+        [
+            ["Identificador do relatório", meta.get("report_id", "-")],
+            ["Gerado em", meta.get("report_generated_at", meta.get("fetched_at", "-"))],
+            ["Versão da aplicação", meta.get("app_version", APP_VERSION)],
+            ["Fonte", meta.get("source_url", APP_BASE_URL)],
+            ["Estratégia de busca", meta.get("search_strategy", "janela_unica")],
+            ["Cobertura parcial", "Sim" if meta.get("is_partial", False) else "Não"],
+            ["Filtros efetivos", filter_summary],
+        ],
+        columns=["Campo", "Valor"],
+    )
+    dictionary_df = pd.DataFrame(
+        [[column_name, _column_description(column_name)] for column_name in export_df.columns],
+        columns=["Campo", "Descrição"],
+    )
+    summary_df = prepare_dataframe_for_export(summary_df)
+    ranking_df = prepare_dataframe_for_export(ranking_df)
+    metadata_df = prepare_dataframe_for_export(metadata_df)
+    dictionary_df = prepare_dataframe_for_export(dictionary_df)
 
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        summary_df.to_excel(writer, index=False, sheet_name="Resumo")
-        ranking_df.to_excel(writer, index=False, sheet_name=ranking_sheet_name)
-        export_df.to_excel(writer, index=False, sheet_name=export_sheet_name)
+        summary_df.to_excel(writer, index=False, sheet_name="Resumo", startrow=2)
+        ranking_df.to_excel(writer, index=False, sheet_name=ranking_sheet_name, startrow=2)
+        export_df.to_excel(writer, index=False, sheet_name=export_sheet_name, startrow=2)
+        metadata_df.to_excel(writer, index=False, sheet_name="Metadados", startrow=2)
+        dictionary_df.to_excel(writer, index=False, sheet_name="Dicionario", startrow=2)
+
+        sheets = writer.sheets
+        _write_export_title(sheets["Resumo"], "PNCP Intelligence", "Resumo executivo e indicadores do recorte")
+        _write_export_title(sheets[ranking_sheet_name], "PNCP Intelligence", "Ranking calculado a partir da base filtrada")
+        _write_export_title(sheets[export_sheet_name], "PNCP Intelligence", "Base integral do recorte para auditoria e análise")
+        _write_export_title(sheets["Metadados"], "PNCP Intelligence", "Proveniência, cobertura e rastreabilidade da exportação")
+        _write_export_title(sheets["Dicionario"], "PNCP Intelligence", "Descrição dos campos presentes na base exportada")
+
+        _style_export_sheet(sheets["Resumo"], table_name="ResumoPncp")
+        _style_export_sheet(sheets[ranking_sheet_name], table_name="RankingPncp")
+        _style_export_sheet(sheets[export_sheet_name], table_name="BasePncp")
+        _style_export_sheet(sheets["Metadados"], table_name="MetadadosPncp")
+        _style_export_sheet(sheets["Dicionario"], table_name="DicionarioPncp")
 
     return output.getvalue()
 
@@ -2424,7 +2758,18 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
     unique_organs = filtered_df["orgao_nome"].nunique()
     years_covered = filtered_df["ano"].dropna().nunique()
 
-    metric_col_1, metric_col_2, metric_col_3, metric_col_4, metric_col_5 = st.columns(5)
+    context_strip(
+        "Visao do recorte",
+        "Indicadores, graficos e exportacoes respondem apenas aos filtros ativos.",
+        [
+            f"{format_integer(total_contracts)} contratos",
+            f"{format_currency(total_value)} contratados",
+            f"{format_integer(unique_organs)} orgaos",
+            f"{format_integer(years_covered)} anos",
+        ],
+    )
+
+    metric_col_1, metric_col_2, metric_col_3, metric_col_4 = st.columns(4)
     with metric_col_1:
         ui_metric_card("Contratos", format_integer(total_contracts), icon="📄", delta="Base filtrada")
     with metric_col_2:
@@ -2433,8 +2778,6 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
         ui_metric_card("Valor medio", format_currency(average_value), icon="📈", delta="Ticket medio")
     with metric_col_4:
         ui_metric_card("Orgaos", format_integer(unique_organs), icon="🏛️", delta="Relacionamentos distintos")
-    with metric_col_5:
-        ui_metric_card("Anos cobertos", format_integer(years_covered), icon="🗓️", delta="Historico visivel")
 
     tab_1, tab_2, tab_3, tab_4, tab_5, tab_6 = st.tabs(
         [
@@ -2686,20 +3029,31 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
     with tab_6:
         section_header(
             "Exportar base filtrada",
-            "Gere PDF executivo ou completo, alem dos pacotes Excel e CSV da base filtrada.",
+            "Gere um PDF executivo, uma amostra detalhada ou uma base completa em Excel e CSV com metadados de rastreabilidade.",
             icon="⬇️",
         )
-        export_summary = advanced_summary if advanced_filter_state.active_filters else "Sem filtros avancados ativos."
+        export_summary_parts: list[str] = []
+        if advanced_filter_state.active_filters:
+            export_summary_parts.append(advanced_summary)
+        if selected_orgaos:
+            export_summary_parts.append(f"Orgaos: {len(selected_orgaos)}")
+        if selected_years:
+            export_summary_parts.append(f"Anos: {len(selected_years)}")
+        if selected_situations:
+            export_summary_parts.append(f"Situacoes: {len(selected_situations)}")
+        export_summary = " | ".join(export_summary_parts) if export_summary_parts else "Sem filtros ativos."
         export_meta = {
             **meta,
-            "fetched_at": datetime.now().strftime("%d/%m/%Y %H:%M"),
+            "fetched_at": datetime.now(REPORT_TIMEZONE).strftime("%d/%m/%Y %H:%M BRT"),
         }
 
+        if st.session_state.get("supplier_export_format") == "PDF Completo":
+            st.session_state["supplier_export_format"] = "PDF Detalhado (amostra)"
         export_col_1, export_col_2 = st.columns([1.2, 1])
         with export_col_1:
             export_format = st.selectbox(
                 "Formato do relatorio",
-                ["PDF Executivo", "PDF Completo", "Excel", "CSV"],
+                ["PDF Executivo", "PDF Detalhado (amostra)", "Excel", "CSV"],
                 key="supplier_export_format",
             )
         with export_col_2:
@@ -2741,23 +3095,8 @@ def render_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
                 use_container_width=True,
             )
 
-        quick_export_col_1, quick_export_col_2 = st.columns(2)
-        with quick_export_col_1:
-            st.download_button(
-                "Baixar CSV rapido",
-                data=dataframe_to_csv_bytes(filtered_df),
-                file_name=f"pncp_contratos_{meta.get('cnpj', '')}.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
-        with quick_export_col_2:
-            st.download_button(
-                "Baixar Excel rapido",
-                data=build_excel_report_bytes(filtered_df, export_meta, export_summary),
-                file_name=f"pncp_contratos_{meta.get('cnpj', '')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
+        else:
+            st.caption("Prepare o formato desejado uma única vez; o arquivo fica disponível para download sem refazer a análise a cada interação.")
 
         section_header("Links uteis", "Atalhos para conferencia no portal e documentacao publica.", icon="🔗")
         st.markdown(
@@ -2931,7 +3270,18 @@ def render_organ_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
     unit_count = filtered_df["unidade_nome"].nunique()
     years_covered = filtered_df["ano"].dropna().nunique()
 
-    metric_col_1, metric_col_2, metric_col_3, metric_col_4, metric_col_5 = st.columns(5)
+    context_strip(
+        "Visao do recorte",
+        "Indicadores, graficos e exportacoes respondem apenas aos filtros ativos.",
+        [
+            f"{format_integer(total_records)} registros",
+            f"{format_currency(total_value)} no recorte",
+            f"{format_integer(supplier_count)} fornecedores",
+            f"{format_integer(years_covered)} anos",
+        ],
+    )
+
+    metric_col_1, metric_col_2, metric_col_3, metric_col_4 = st.columns(4)
     with metric_col_1:
         ui_metric_card("Registros", format_integer(total_records), icon="📄", delta="Base consolidada")
     with metric_col_2:
@@ -2940,8 +3290,6 @@ def render_organ_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
         ui_metric_card("Fornecedores", format_integer(supplier_count), icon="🏢", delta="Contratos com fornecedor")
     with metric_col_4:
         ui_metric_card("Unidades", format_integer(unit_count), icon="🏛️", delta="Estrutura ativa")
-    with metric_col_5:
-        ui_metric_card("Anos cobertos", format_integer(years_covered), icon="🗓️", delta="Faixa visivel")
 
     contracts_df = filtered_df[filtered_df["document_type"].eq("contrato")].copy()
     edital_df = filtered_df[filtered_df["document_type"].eq("edital")].copy()
@@ -3229,19 +3577,21 @@ def render_organ_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
     with tab_6:
         section_header(
             "Exportar base consolidada",
-            "Baixe CSV, Excel e PDF do panorama do orgao com faixa anual, tipo de documento, unidade e fornecedor.",
+            "Gere PDF executivo, uma amostra detalhada ou a base completa em Excel e CSV com cobertura, filtros e identificador de rastreabilidade.",
             icon="⬇️",
         )
 
         export_meta = {
             **meta,
-            "fetched_at": datetime.now().strftime("%d/%m/%Y %H:%M"),
+            "fetched_at": datetime.now(REPORT_TIMEZONE).strftime("%d/%m/%Y %H:%M BRT"),
         }
+        if st.session_state.get("organ_export_format") == "PDF Completo":
+            st.session_state["organ_export_format"] = "PDF Detalhado (amostra)"
         export_col_1, export_col_2 = st.columns([1.2, 1])
         with export_col_1:
             export_format = st.selectbox(
                 "Formato do relatorio",
-                ["PDF Executivo", "PDF Completo", "Excel", "CSV"],
+                ["PDF Executivo", "PDF Detalhado (amostra)", "Excel", "CSV"],
                 key="organ_export_format",
             )
         with export_col_2:
@@ -3283,23 +3633,8 @@ def render_organ_dashboard(df: pd.DataFrame, meta: dict[str, Any]) -> None:
                 use_container_width=True,
             )
 
-        quick_export_col_1, quick_export_col_2 = st.columns(2)
-        with quick_export_col_1:
-            st.download_button(
-                "Baixar CSV rapido",
-                data=dataframe_to_csv_bytes(filtered_df),
-                file_name=f"pncp_orgao_{meta.get('cnpj', '')}_{meta.get('start_year', '-')}_{meta.get('end_year', '-')}.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
-        with quick_export_col_2:
-            st.download_button(
-                "Baixar Excel rapido",
-                data=build_excel_report_bytes(filtered_df, export_meta, filter_summary),
-                file_name=f"pncp_orgao_{meta.get('cnpj', '')}_{meta.get('start_year', '-')}_{meta.get('end_year', '-')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
+        else:
+            st.caption("Prepare o formato desejado uma única vez; o arquivo permanece pronto para download durante a sessão sem reprocessar a base em cada interação.")
 
         section_header("Links uteis", "Atalhos para conferencia direta do orgao no portal e documentacao publica.", icon="🔗")
         st.markdown(
